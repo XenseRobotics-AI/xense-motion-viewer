@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robot-motion-workbench"
+version = "0.4.0"
+description = "Robot-owned sessions, full policy references and asynchronous URDF-to-Rerun visualization"
+requires-python = ">=3.12"
+dependencies = ["numpy>=2,<3"]
+
+[project.optional-dependencies]
+rerun = ["rerun-sdk==0.38.1", "trimesh==5.1.1", "pycollada==0.9.3"]
+elite = ["libpyelite==0.1.0", "PyYAML>=6"]
+qt = ["PySide6>=6.6,<7"]
+test = ["pytest>=8"]
+
+[project.scripts]
+rmw-elite-record = "robot_motion_workbench.adapters.elite:record_main"
+rmw-elite-qt = "robot_motion_workbench.adapters.elite:qt_main"
+rmw-elite-policy = "robot_motion_workbench.adapters.elite_policy:main"
+rmw-policy-replay = "robot_motion_workbench.adapters.elite_policy:replay_main"
+rmw-demo = "robot_motion_workbench.examples.reference:main"
+rmw-demo-qt = "robot_motion_workbench.examples.reference:qt_main"
+rmw-callback-demo = "robot_motion_workbench.examples.callback_sdk:main"
+
+[tool.setuptools.package-data]
+robot_motion_workbench = ["assets/*.urdf", "assets/*.txt"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["elite: requires the source-backed libpyelite native installation"]

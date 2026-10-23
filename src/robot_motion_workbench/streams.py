@@ -1,0 +1,106 @@
+"""Bounded best-effort display consumption, independent of robot scheduling."""
+from collections import deque
+from dataclasses import dataclass
+from threading import Condition, Thread
+
+
+@dataclass(frozen=True)
+class DisplayStats:
+    accepted: int
+    consumed: int
+    dropped_full: int
+    discarded_close: int
+    rejected_closed: int
+    errors: int
+    pending: int
+    closed: bool
+    alive: bool
+    last_error: str | None
+
+
+class VisualizationWorker:
+    """FIFO, drop-newest when full; consumer work never holds the queue lock.
+
+    publish never waits for capacity or rendering. A small mutex protects only
+    queue bookkeeping; this is not a hard-real-time or lock-free guarantee.
+    Drain on close by default; timeout returns False if a consumer is still
+    running. Python cannot kill a hung callback. Re-close after it returns.
+    Consumer exceptions are counted and consumption continues. close_callback
+    runs once on the display thread (e.g. renderer flush/disconnect).
+    """
+    def __init__(self, consume, *, capacity=64, close_callback=None):
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
+            raise ValueError('capacity must be a positive integer')
+        self._consume, self._finish = consume, close_callback
+        self._capacity = capacity
+        self._queue = deque()
+        self._condition = Condition()
+        self._closed = False
+        self._accepted = self._consumed = self._dropped = self._rejected = self._errors = 0
+        self._last_error = None
+        self._discarded = 0
+        self._thread = Thread(target=self._run, name='rmw-visualization', daemon=True)
+        self._thread.start()
+
+    def publish(self, event):
+        with self._condition:
+            if self._closed:
+                self._rejected += 1
+                return False
+            if len(self._queue) >= self._capacity:
+                self._dropped += 1
+                return False
+            self._queue.append(event)
+            self._accepted += 1
+            self._condition.notify()
+            return True
+
+    @property
+    def stats(self):
+        with self._condition:
+            return DisplayStats(self._accepted, self._consumed, self._dropped, self._discarded, self._rejected,
+                                self._errors, len(self._queue), self._closed,
+                                self._thread.is_alive(), self._last_error)
+
+    def _error(self, exc):
+        with self._condition:
+            self._errors += 1
+            self._last_error = f'{type(exc).__name__}: {exc}'
+
+    def _run(self):
+        try:
+            while True:
+                with self._condition:
+                    self._condition.wait_for(lambda: self._queue or self._closed)
+                    if not self._queue:
+                        break
+                    event = self._queue.popleft()
+                try:
+                    self._consume(event)
+                except Exception as exc:
+                    self._error(exc)
+                finally:
+                    with self._condition:
+                        self._consumed += 1
+        finally:
+            if self._finish:
+                try:
+                    self._finish()
+                except Exception as exc:
+                    self._error(exc)
+
+    def close(self, *, drain=True, timeout=5.0):
+        with self._condition:
+            self._closed = True
+            if not drain:
+                self._discarded += len(self._queue)
+                self._queue.clear()
+            self._condition.notify_all()
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
