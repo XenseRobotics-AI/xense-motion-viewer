@@ -1,11 +1,13 @@
 """Offline Elite sandbox bridge; all motion semantics stay in libpyelite.sim."""
 import argparse
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 import os
 import sys
 import importlib.util
 from pathlib import Path
+from threading import Condition, Thread
+from time import perf_counter
 
 import numpy as np
 
@@ -86,6 +88,111 @@ class EliteStationAdapter:
                           tcp_poses=sim.tcp_poses(), targets=sim.targets())
 
 
+@dataclass(frozen=True)
+class EliteDisplayStats:
+    accepted: int
+    rendered: int
+    coalesced: int
+    pending: int
+    errors: int
+    last_error: str | None
+    closed: bool
+    alive: bool
+    latest_time: float
+    rendered_time: float
+    last_lag_s: float
+    max_lag_s: float
+
+
+class _LatestDisplay:
+    """One in-flight frame and one replaceable pending frame, capped at 30 Hz.
+
+    Only immutable snapshots/visibility cross this boundary. No SDK, simulation
+    or input object is passed to the consumer. A stuck sink cannot block Qt;
+    close has a finite join and reports a still-running daemon explicitly.
+    """
+    def __init__(self, consume, finish, *, hz=30, open_callback=None):
+        self.consume, self.finish = consume, finish
+        self.open_callback = open_callback
+        self.open_requested = False
+        self.period = 1 / hz
+        self.condition = Condition()
+        self.pending = None
+        self.closed = False
+        self.accepted = self.rendered = self.coalesced = self.errors = 0
+        self.last_error = None
+        self.latest_time = self.rendered_time = 0.
+        self.last_lag = self.max_lag = 0.
+        self.thread = Thread(target=self._run, name='elite-rerun', daemon=True)
+        self.thread.start()
+
+    def publish(self, state, visible, *, open_viewer=False):
+        with self.condition:
+            if self.closed:
+                return False
+            self.coalesced += self.pending is not None
+            self.pending = (state, visible, perf_counter())
+            self.open_requested |= open_viewer
+            self.latest_time = state.time
+            self.accepted += 1
+            self.condition.notify()
+            return True
+
+    @property
+    def stats(self):
+        with self.condition:
+            return EliteDisplayStats(self.accepted, self.rendered, self.coalesced, int(self.pending is not None),
+                self.errors, self.last_error, self.closed, self.thread.is_alive(), self.latest_time,
+                self.rendered_time, self.last_lag, self.max_lag)
+
+    def _run(self):
+        next_frame = 0.
+        try:
+            while True:
+                with self.condition:
+                    self.condition.wait_for(lambda: self.pending is not None or self.closed)
+                    if self.pending is None:
+                        break
+                    # Wait before taking the mailbox, so newer states replace
+                    # the pending one throughout the cadence/slow-sink delay.
+                    wait = next_frame - perf_counter()
+                    if wait > 0 and not self.closed:
+                        self.condition.wait(timeout=wait)
+                        if perf_counter() < next_frame and not self.closed:
+                            continue
+                    state, visible, received = self.pending
+                    open_viewer, self.open_requested = self.open_requested, False
+                    self.pending = None
+                try:
+                    if open_viewer and self.open_callback is not None:
+                        self.open_callback(state, visible)
+                    self.consume(state, visible)
+                    with self.condition:
+                        self.rendered += 1
+                        self.rendered_time = state.time
+                        self.last_lag = perf_counter() - received
+                        self.max_lag = max(self.max_lag, self.last_lag)
+                except Exception as exc:
+                    with self.condition:
+                        self.errors += 1
+                        self.last_error = f'{type(exc).__name__}: {exc}'
+                next_frame = perf_counter() + self.period
+        finally:
+            try:
+                self.finish()
+            except Exception as exc:
+                with self.condition:
+                    self.errors += 1
+                    self.last_error = f'{type(exc).__name__}: {exc}'
+
+    def close(self, timeout=1.):
+        with self.condition:
+            self.closed = True
+            self.condition.notify_all()
+        self.thread.join(timeout=max(0., timeout))
+        return not self.thread.is_alive()
+
+
 class EliteRerunView:
     """Duck-typed viewer consumed by the existing Elite Qt input window."""
     url = 'Rerun native viewer'
@@ -93,12 +200,45 @@ class EliteRerunView:
     def __init__(self, simulation, recording, *, instance_id='elite_station', port=9876):
         from ..rerun_renderer import RerunRenderer
         self.adapter = EliteStationAdapter(simulation, instance_id=instance_id)
-        self.renderer = RerunRenderer(recording, timeline='sandbox_elapsed')
+        self.instance_id = instance_id
+        self.renderer = RerunRenderer(recording, timeline='sandbox_elapsed', compact=True)
         self.renderer.add_robot(self.adapter.describe())
         self.port = port
         self._previous_raw = 0.0
         self._time_offset = 0.0
+        self._display = None
+        self.collision_visible = False
+        self._last_state = None
         self.update(simulation)
+
+    def start_display(self):
+        if self._display is None:
+            self._display = _LatestDisplay(self._consume, self._finish, open_callback=self._open)
+
+    @property
+    def stats(self):
+        return self._display.stats if self._display else EliteDisplayStats(
+            self.renderer.update_count, self.renderer.update_count, 0, 0, 0, None, False, False,
+            self._last_state.time, self._last_state.time, 0., 0.)
+
+    def _consume(self, state, visible):
+        self.renderer.set_collision_visible(visible)
+        self.renderer.update(self.instance_id, state)
+
+    def _finish(self):
+        try:
+            self.renderer.recording.flush(timeout_sec=.5)
+        finally:
+            try:
+                self.renderer.recording.disconnect()
+            finally:
+                self.renderer.recording._rmw_server = None
+
+    def close(self, timeout=1.):
+        if self._display:
+            return self._display.close(timeout)
+        self._finish()
+        return True
 
     def update(self, simulation):
         if simulation is not self.adapter.simulation:
@@ -109,15 +249,35 @@ class EliteRerunView:
         if state.time < self._previous_raw:
             self._time_offset += self._previous_raw
         self._previous_raw = state.time
-        self.renderer.update(self.adapter.describe().instance_id, replace(state, time=state.time + self._time_offset))
+        self._last_state = replace(state, time=state.time + self._time_offset)
+        if self._display:
+            self._display.publish(self._last_state, self.collision_visible)
+        else:
+            self._consume(self._last_state, self.collision_visible)
 
     def set_collision_visible(self, visible):
-        self.renderer.set_collision_visible(visible)
+        self.collision_visible = bool(visible)
+        if self._display:
+            self._display.publish(self._last_state, self.collision_visible)
+        else:
+            self.renderer.set_collision_visible(visible)
 
     def open(self):
-        import rerun as rr
-        rr.spawn(port=self.port, recording=self.renderer.recording,
-                 executable_path=str(Path(sys.executable).parent / 'rerun'))
+        if self._display:
+            return self._display.publish(self._last_state, self.collision_visible, open_viewer=True)
+        return self._open(self._last_state, self.collision_visible)
+
+    def _open(self, state, visible):
+        def keyframe():
+            # GrpcServerSink 0.38.1 can evict static messages too. Refresh the
+            # model and every dynamic placement only for a new Viewer attachment.
+            self.renderer.refresh_static(self.instance_id)
+            self.renderer._last_poses.clear()
+            self.renderer._frames[self.instance_id].clear()
+            self.renderer.set_collision_visible(visible, force=True)
+            self.renderer.update(self.instance_id, state)
+            self.renderer.recording.flush(timeout_sec=.5)
+        return _open_recording_viewer(self.renderer.recording, self.port, prepare=keyframe)
 
 
 class EliteSandboxRuntime:
@@ -170,6 +330,8 @@ def make_generic_qt_window(simulation, view, *, xyz_range=0.3):
     from ..qt import ControlPanel
     app = QApplication.instance() or QApplication([])
     adapter = view.adapter if view else EliteStationAdapter(simulation)
+    if view:
+        view.start_display()
     session = RobotSession(adapter)
     inputs = session.activate('qt')
     runtime = EliteSandboxRuntime(adapter, view)
@@ -186,7 +348,7 @@ def make_generic_qt_window(simulation, view, *, xyz_range=0.3):
     status.setWordWrap(True)
     layout.addWidget(status)
     open_button = QPushButton('Open Rerun')
-    open_button.setEnabled(view is not None)
+    open_button.setEnabled(view is not None and getattr(view.renderer.recording, '_rmw_server', None) is not None)
     if view:
         open_button.clicked.connect(view.open)
     layout.addWidget(open_button)
@@ -242,6 +404,8 @@ def make_generic_qt_window(simulation, view, *, xyz_range=0.3):
     def close(event):
         timer.stop()
         inputs.close()
+        if view and not view.close(timeout=1.):
+            status.setText('Rerun close timed out; display thread is still draining (control stopped).')
         event.accept()
     window.closeEvent = close
     timer.start()
@@ -259,6 +423,8 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
     qt = _load_qt()
     app = qt['QApplication'].instance() or qt['QApplication']([])
     adapter = view.adapter if view else EliteStationAdapter(simulation)
+    if view:
+        view.start_display()
     session = RobotSession(adapter)
     inputs = session.activate('qt')
     runtime = EliteSandboxRuntime(adapter, view)
@@ -302,6 +468,7 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
             button.clicked.disconnect()
             if view:
                 button.clicked.connect(view.open)
+                button.setEnabled(getattr(view.renderer.recording, '_rmw_server', None) is not None)
     receipt_label = qt['QLabel']('Input owner: qt · target submission does not mean sent or achieved.')
     receipt_label.setWordWrap(True)
     window.centralWidget().layout().addWidget(receipt_label)
@@ -356,6 +523,11 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
     def tick():
         try:
             display(runtime.poll())
+            if view:
+                stats = view.stats
+                window.mesh_status.setText(
+                    f'Rerun ≤30 Hz · 合并 {stats.coalesced} 帧 · 显示耗时 {stats.last_lag_s*1000:.0f} ms'
+                    + (f' · 错误: {stats.last_error}' if stats.errors else ''))
         except Exception as exc:
             window.render_timer.stop()
             window.ik_status.setText(f'仿真已暂停: {exc}; reset explicitly to a checked safe configuration.')
@@ -367,6 +539,8 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
     def close(event):
         window.render_timer.stop()
         inputs.close()
+        if view and not view.close(timeout=1.):
+            receipt_label.setText('Rerun close timed out; display thread is still draining (control stopped).')
         event.accept()
     window.closeEvent = close
     return app, window
@@ -414,13 +588,57 @@ def _simulation(args):
     return StationSimulation(station, settings=settings, collision_profile=collision)
 
 
-def _recording(path):
+def _open_recording_viewer(recording, port, *, prepare=None):
+    """Display-owner operation; never replaces sinks or reopens the file."""
+    import time
+    import rerun as rr
+    from rerun.experimental import ViewerClient
+    server = getattr(recording, '_rmw_server', None)
+    if server is None:
+        raise RuntimeError('Live viewing was not configured; restart without --no-viewer or replay the saved RRD')
+    deadline = perf_counter() + 3.
+    while True:
+        try:
+            rr.spawn(port=port, connect=False, recording=recording,
+                     executable_path=str(Path(sys.executable).parent / 'rerun'))
+            client = ViewerClient.connect(f'rerun+http://127.0.0.1:{port}/proxy')
+            if (client.viewer_state().active_recording or '').endswith(':' + recording.get_recording_id()):
+                return False  # Already viewing this recording: preserve camera.
+            if prepare is not None:
+                prepare()
+            client.open_url(server.uri)
+            return True
+        except ConnectionError:
+            # A just-closed Viewer may still own its port while shutting down.
+            if perf_counter() >= deadline:
+                raise
+            time.sleep(.05)
+
+
+def _recording(path, *, viewer_port=None):
     import rerun as rr
     rr.set_strict_mode(True)
-    recording = rr.RecordingStream('robot-motion-workbench-elite')
+    # SDK default microbatch tick is 200ms, visible as drag latency even when
+    # Python logging is fast. Match the Elite display's 30Hz delivery cadence.
+    recording = rr.RecordingStream('robot-motion-workbench-elite',
+                                   batcher_config=rr.ChunkBatcherConfig(flush_tick=.033))
+    sinks = []
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        recording.save(path)
+        sinks.append(rr.FileSink(path))
+    if viewer_port is not None:
+        import socket
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            server_port = sock.getsockname()[1]
+        recording._rmw_server = rr.GrpcServerSink(bind_ip='127.0.0.1', port=server_port,
+                                                 server_memory_limit='64MiB')
+        sinks.append(recording._rmw_server)
+    if sinks:
+        recording.set_sinks(*sinks)
+    recording._rmw_save_path = path
+    if viewer_port is not None:
+        _open_recording_viewer(recording, viewer_port)
     return recording
 
 
@@ -479,12 +697,10 @@ def qt_main(argv=None):
     if not np.isfinite(args.xyz_range) or args.xyz_range <= 0:
         parser.error('--xyz-range must be finite and positive')
     sim = _simulation(args)
-    recording = _recording(args.save)
+    recording = _recording(args.save, viewer_port=None if args.no_viewer else args.port)
     view = EliteRerunView(sim, recording, instance_id=args.instance_id, port=args.port)
     factory = make_qt_window if args.ui == 'elite' else make_generic_qt_window
     app, window = factory(sim, view, xyz_range=args.xyz_range)
-    if not args.no_viewer:
-        view.open()
     if args.no_show:
         window.render_timer.stop()
         side = next(iter(sim.arms))
@@ -520,12 +736,12 @@ def qt_main(argv=None):
             toggle.setChecked(True)
         else:
             view.set_collision_visible(True)
-        assert view.renderer.collision_visible
+        assert view.collision_visible
         if toggle is not None:
             toggle.setChecked(False)
         else:
             view.set_collision_visible(False)
-        assert not view.renderer.collision_visible
+        assert not view.collision_visible
         collision_toggled = True
         window._reset_home()
         window.render_timer.stop()
@@ -533,7 +749,6 @@ def qt_main(argv=None):
         window.advance()
         app.processEvents()
         window.close()
-        view.renderer.flush()
         print(json.dumps({'qt_smoke': 'passed', 'render_updates': view.renderer.update_count,
                           'simulation_seconds': view.adapter.snapshot().time,
                           'joint_input_checked': True, 'cartesian_input_checked': True,
@@ -541,9 +756,12 @@ def qt_main(argv=None):
         return 0
     window.show()
     try:
-        return app.exec()
+        result = app.exec()
     finally:
-        view.renderer.flush()
+        closed = view.close(timeout=1.)
+        if not closed or view.stats.errors:
+            print(f'Rerun display close={closed}; stats={view.stats}', file=sys.stderr)
+    return result if closed and not view.stats.errors else 1
 
 
 if __name__ == '__main__':

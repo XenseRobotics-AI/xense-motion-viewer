@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "robot-motion-workbench"
-version = "0.4.0"
+version = "0.4.1"
 description = "Robot-owned sessions, full policy references and asynchronous URDF-to-Rerun visualization"
 requires-python = ">=3.12"
 dependencies = ["numpy>=2,<3"]

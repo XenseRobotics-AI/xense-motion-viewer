@@ -53,10 +53,11 @@ class PolicyRerunRenderer:
     Drop-newest display delivery may omit events: the status shows queue stats,
     and expiry is also checked against each received event's host time.
     """
-    def __init__(self, recording, description, *, timeline='sandbox_elapsed', max_age=0.25):
+    def __init__(self, recording, description, *, timeline='sandbox_elapsed', max_age=0.25,
+                 shared_view=False, telemetry=False, compact=False):
         import rerun as rr
         self.rr, self.recording = rr, recording
-        self.robot = RerunRenderer(recording, timeline=timeline)
+        self.robot = RerunRenderer(recording, timeline=timeline, compact=compact)
         self.model = self.robot.add_robot(description)
         self.description, self.timeline, self.max_age = description, timeline, max_age
         self.root = f'world/policy/{segment(description.instance_id)}'
@@ -72,11 +73,23 @@ class PolicyRerunRenderer:
         self._feedback_paths = {}
         self._preview_provider = None
         self._kind = None
+        self._shared_view, self._telemetry = shared_view, telemetry
+        self._scene = None
+        self._selected_points = None
+        self._camera_initialized = False
         self.blueprint()
 
     def blueprint(self):
         import rerun.blueprint as rrb
         status = rrb.TextDocumentView(origin=f'{self.panel}/status', name='Provenance / selection / freshness')
+        if self._shared_view:
+            if self._scene is None:
+                self._scene = rrb.Spatial3DView(origin='world',
+                    contents=['/world/**', f'- /{self.robot.instance_path(self.description.instance_id)}/collision/**'],
+                    name='Robot + future (blue) / selected (orange) / received (green)')
+            contents = rrb.Horizontal(self._scene, status, column_shares=[4, 1]) if self._telemetry else self._scene
+            self.recording.send_blueprint(rrb.Blueprint(contents, collapse_panels=True))
+            return
         tcp = segment(self._active.tcp) if self._active is not None and self._active.tcp else '*'
         eye = None
         if self._active is not None and self._active.kind == 'absolute_tcp_poses':
@@ -109,6 +122,7 @@ class PolicyRerunRenderer:
         if self._active is not None and self._active.chunk_id != c.chunk_id:
             self._clear(self._active.chunk_id)
         self._active, self._selected = c, None
+        self._selected_points = c.values[:, :3, 3] if c.kind == 'absolute_tcp_poses' else None
         if view_changed:
             self._kind = c.kind
             self.blueprint()
@@ -123,6 +137,8 @@ class PolicyRerunRenderer:
             points = c.values[:, :3, 3]
             self._tcp_path(path, points, c)
             for index, pose in enumerate(c.values):
+                if self._shared_view and index not in (0, len(c.values) - 1):
+                    continue
                 axis = f'{path}/axes/{index}'
                 self.robot._transform(axis, pose)
                 self.recording.log(axis, self.rr.TransformAxes3D(0.025), self.rr.CoordinateFrame(self.robot.frame_id(axis)))
@@ -144,6 +160,18 @@ class PolicyRerunRenderer:
                     tool_paths[key].append((transforms[tool.parent_link] @ tool.link_from_tool)[:3, 3])
             for key, points in tool_paths.items():
                 self._tcp_path(f'{path}/preview/{segment(key)}', np.asarray(points), c)
+                if self._selected_points is None:
+                    self._selected_points = np.asarray(points)
+        if self._shared_view and not self._camera_initialized and self._selected_points is not None:
+            import rerun.blueprint as rrb
+            # Frame the working arm and its short path together, rather than
+            # letting the large table/stand make the reference a few pixels.
+            center = self._selected_points.mean(axis=0)
+            self._scene.properties['EyeControls3D'] = rrb.EyeControls3D(
+                position=center + [0.5, -0.65, 0.45], look_target=center + [0., 0., .07], eye_up=[0, 0, 1])
+            self.blueprint()
+            self._scene.properties.pop('EyeControls3D')
+            self._camera_initialized = True
 
     def _tcp_path(self, path, points, chunk):
         labels = [''] * len(chunk.time_offsets)
@@ -151,9 +179,9 @@ class PolicyRerunRenderer:
             labels[i] = f'{chunk.chunk_id}[{i}] +{chunk.time_offsets[i]:.2f}s reference'
         frame = self.rr.CoordinateFrame(self.robot.frame_id('world'))
         self.recording.log(f'{path}/tcp_path', self.rr.LineStrips3D([points],
-            colors=[100, 164, 255], radii=0.004), frame)
+            colors=[100, 164, 255], radii=0.006 if self._shared_view else 0.004), frame)
         self.recording.log(f'{path}/steps', self.rr.Points3D(points, colors=[100, 164, 255],
-            radii=0.006, labels=labels, show_labels=True), frame)
+            radii=0.006, labels=labels, show_labels=not self._shared_view), frame)
 
     def consume(self, event: StreamEvent, *, stats=None):
         now = event.timing.received_at
@@ -182,9 +210,9 @@ class PolicyRerunRenderer:
         elif event.stage == 'selection':
             self._selected = event.ref
             if (self._active is not None and self._active.chunk_id == event.ref.chunk_id
-                    and self._active.kind == 'absolute_tcp_poses'):
+                    and self._selected_points is not None):
                 self.recording.log(f'{self.root}/chunks/{segment(event.ref.chunk_id)}/prediction/selected',
-                    self.rr.Points3D([self._active.values[event.ref.step_index, :3, 3]],
+                    self.rr.Points3D([self._selected_points[event.ref.step_index]],
                         colors=[255, 187, 65], radii=0.008,
                         labels=[f'selected [{event.ref.step_index}]'], show_labels=True),
                     self.rr.CoordinateFrame(self.robot.frame_id('world')))
@@ -210,7 +238,8 @@ class PolicyRerunRenderer:
                     history.append(tcp[:3, 3])
                     del history[:-2048]
                     self.recording.log(f'{self.root}/feedback_path/{segment(key)}', self.rr.LineStrips3D(
-                        [history], colors=[65, 210, 150], radii=0.003),
+                        [history], colors=[65, 240, 120] if self._shared_view else [65, 210, 150],
+                        radii=0.004 if self._shared_view else 0.003),
                         self.rr.CoordinateFrame(self.robot.frame_id('world')))
         self._draw_status(now, stats)
 

@@ -121,6 +121,16 @@ accepted, consumed (including errored callbacks), pending, dropped_full,
 discarded_close, rejected_closed, errors, last_error, closed and alive. A callback
 runs outside the bookkeeping lock, so slow rendering cannot hold up publication
 or target submission. Consumer errors are counted and the worker continues.
+
+The Elite mock CLI additionally enables `coalesce_feedback=True`: newer
+available feedback/planned display samples replace older pending samples of
+the same origin, then are appended in host-time order. Control lifecycle, sent
+evidence, absence and different-origin samples remain distinct. `stats.coalesced`
+counts these replaced samples. The generic worker's default remains FIFO.
+Elite displays robot, full future reference, selected point and received TCP
+trail in one shared 3D view; `--telemetry` adds only a text panel. Its default
+mock execution is wall-clock paced, with bounded references around startup;
+`--no-viewer --fast --steps N` is the explicit finite verification path.
 The host must inspect counters and the Boolean close result. A custom sink can
 violate the nonblocking contract; do not pass synchronous rendering as the
 publisher. Publisher exceptions are contained so an SDK-accepted command still

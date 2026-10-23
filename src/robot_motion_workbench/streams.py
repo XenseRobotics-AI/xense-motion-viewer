@@ -16,6 +16,7 @@ class DisplayStats:
     closed: bool
     alive: bool
     last_error: str | None
+    coalesced: int = 0
 
 
 class VisualizationWorker:
@@ -28,7 +29,7 @@ class VisualizationWorker:
     Consumer exceptions are counted and consumption continues. close_callback
     runs once on the display thread (e.g. renderer flush/disconnect).
     """
-    def __init__(self, consume, *, capacity=64, close_callback=None):
+    def __init__(self, consume, *, capacity=64, close_callback=None, coalesce_feedback=False):
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
             raise ValueError('capacity must be a positive integer')
         self._consume, self._finish = consume, close_callback
@@ -39,6 +40,8 @@ class VisualizationWorker:
         self._accepted = self._consumed = self._dropped = self._rejected = self._errors = 0
         self._last_error = None
         self._discarded = 0
+        self._coalesce_feedback = coalesce_feedback
+        self._coalesced = 0
         self._thread = Thread(target=self._run, name='rmw-visualization', daemon=True)
         self._thread.start()
 
@@ -47,6 +50,22 @@ class VisualizationWorker:
             if self._closed:
                 self._rejected += 1
                 return False
+            if (self._coalesce_feedback and getattr(event, 'stage', None) in ('feedback', 'planned')
+                    and event.available):
+                # Remove older pending display samples, then append the latest
+                # at its proper chronological position. Never coalesce control
+                # lifecycle, sent evidence, absence or provenance transitions.
+                remove = set()
+                for index in range(len(self._queue) - 1, -1, -1):
+                    prior = self._queue[index]
+                    if prior.stage != event.stage:
+                        continue
+                    if not prior.available or prior.origin != event.origin:
+                        break  # Preserve every availability/origin boundary.
+                    remove.add(index)
+                retained = deque(e for index, e in enumerate(self._queue) if index not in remove)
+                self._coalesced += len(self._queue) - len(retained)
+                self._queue = retained
             if len(self._queue) >= self._capacity:
                 self._dropped += 1
                 return False
@@ -60,7 +79,7 @@ class VisualizationWorker:
         with self._condition:
             return DisplayStats(self._accepted, self._consumed, self._dropped, self._discarded, self._rejected,
                                 self._errors, len(self._queue), self._closed,
-                                self._thread.is_alive(), self._last_error)
+                                self._thread.is_alive(), self._last_error, self._coalesced)
 
     def _error(self, exc):
         with self._condition:

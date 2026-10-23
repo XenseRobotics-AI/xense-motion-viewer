@@ -155,6 +155,15 @@ controls remain offline simulation lifecycle operations, require Qt ownership,
 and are not portable robot-motion commands. Rendering preserves its monotonic
 output clock across reset without changing planner clocks.
 
+Elite Qt delivers copied snapshots through a 30 Hz latest-state mailbox: one
+frame may be in flight and one pending frame is replaced by newer state.
+Collision visibility uses that same display thread and keeps the view ID.
+Compact rendering uses relative joint transforms and exact collision-mesh
+concatenation by parent/color; the native control/collision path and poll
+scheduling are unchanged. Close waits at most one second and exposes timeouts
+and display errors. The Elite CLI configures file + gRPC sinks together before
+logging, with a 33 ms batch tick; it does not replace a file sink by spawning.
+
 The optional `elite` extra alone cannot guarantee the current planner: use the
 current-source wheel recorded in the Phase 1 evidence, rather than trusting
 its version number. Missing Elite imports produce installation guidance with
