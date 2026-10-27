@@ -108,10 +108,11 @@ def main(argv=None):
         reference_source['coordination'] = 'Both targets submitted at the same sample time before one native station step'
     recording.log(f'{renderer.panel}/reference_source',
                   renderer.rr.TextDocument(json.dumps(reference_source, indent=2), media_type='text/plain'), static=True)
-    worker = VisualizationWorker(lambda event: renderer.consume(event, stats=worker.stats),
-                                 capacity=args.queue_capacity, close_callback=renderer.close, coalesce_feedback=True)
+    worker = VisualizationWorker(lambda events: renderer.consume_batch(events, stats=worker.stats),
+                                 capacity=args.queue_capacity, close_callback=renderer.close, batch=True)
+    pending_events = []
     inputs = session.activate('policy')
-    policies = {side: PolicyInput(inputs, lambda event, side=side: worker.publish(replace(event, group=side)))
+    policies = {side: PolicyInput(inputs, lambda event, side=side: pending_events.append(replace(event, group=side)))
                 for side in arms}
     initial = session.snapshot()
     next_display = initial.time + 1 / args.display_hz
@@ -125,7 +126,8 @@ def main(argv=None):
     wall_start = time.perf_counter()
     next_tick = wall_start
     try:
-        worker.publish(StreamEvent('feedback', SampleTime(0, initial.time, 'elite_simulation'), 'simulated', state=initial))
+        worker.publish_many([StreamEvent('feedback', SampleTime(0, initial.time, 'elite_simulation'),
+                                        'simulated', state=initial)])
         for step in range(steps):
             if not args.fast:
                 delay = next_tick - time.perf_counter()
@@ -174,7 +176,7 @@ def main(argv=None):
                     if trajectory:
                         opening = float(trajectories[side].gripper_openings[source_index])
                         gripper_receipt = inputs.submit(adapter.grippers.target(side, opening))
-                        worker.publish(StreamEvent('submitted', SampleTime(now), 'reference', submission.ref,
+                        pending_events.append(StreamEvent('submitted', SampleTime(now), 'reference', submission.ref,
                             receipt=gripper_receipt, group=side,
                             reason='Gripper action from the same recorded source frame as the TCP target'))
                         submissions[-1].update(source_frame_index=int(trajectory.frame_indices[source_index]),
@@ -197,16 +199,22 @@ def main(argv=None):
                 for side in arms:
                     names = session.capabilities.groups[side]
                     planned = JointTarget(side, dict(zip(names, simulation.arms[side].planner.q(), strict=True)))
-                    worker.publish(StreamEvent('planned', timing, 'simulated', refs[side], command=planned,
+                    pending_events.append(StreamEvent('planned', timing, 'simulated', refs[side], command=planned,
                         reason='Native planner.q() after StationSimulation.step; no transport evidence', group=side))
                 # Full station feedback has no single-arm step association.
-                worker.publish(StreamEvent('feedback', timing, 'simulated', state=state,
+                pending_events.append(StreamEvent('feedback', timing, 'simulated', state=state,
                     reason='Snapshot after native simulation step; not hardware measured'))
+                # Deliver one coherent frame. Raw events keep their individual
+                # times; scene updates run once after ingesting the batch.
+                worker.publish_many(pending_events)
+                pending_events.clear()
     except KeyboardInterrupt:
         pass
     finally:
         for policy in policies.values():
             policy.close()
+        if pending_events:
+            worker.publish_many(pending_events)
         closed = worker.close(timeout=2)
     final = session.snapshot()
     stats = asdict(worker.stats)
@@ -217,7 +225,8 @@ def main(argv=None):
                                         for n in session.capabilities.groups[side]) for side in arms},
         final_gripper_openings={side: adapter.grippers.opening(side) for side in arms},
         simulation_time=final.time, wall_seconds=time.perf_counter() - wall_start, paced=not args.fast,
-        shared_3d_view=True, display_hz=args.display_hz, submissions=submissions, display=stats,
+        shared_3d_view=True, display_hz=args.display_hz, display_frames=renderer.robot.update_count,
+        submissions=submissions, display=stats,
         display_closed=closed, sent='unavailable: no transport send telemetry',
         reference_source=reference_source,
         origin=f'offline simulated response / {source} reference', hardware_connections=0)

@@ -20,7 +20,7 @@ def rows(chunks, path, component):
         if chunk.entity_path == '/' + path and component in batch.schema.names:
             times = batch.column('sandbox_elapsed').cast(pa.int64()).to_pylist()
             result.extend((t, row) for t, row in zip(times, batch.column(component).to_pylist()) if row is not None)
-    return result
+    return sorted(result, key=lambda row: row[0])
 
 
 def documents(chunks, path):

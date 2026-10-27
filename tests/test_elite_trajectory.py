@@ -105,14 +105,13 @@ def test_display_samples_follow_time_grid_and_include_final_state(monkeypatch, c
     native_period = simulation.arms['left'].config.period
     monkeypatch.setattr(elite, '_simulation', lambda args: simulation)
     feedback = []
-    publish = VisualizationWorker.publish
+    publish = VisualizationWorker.publish_many
 
-    def capture(worker, event):
-        if event.stage == 'feedback':
-            feedback.append(event)
-        return publish(worker, event)
+    def capture(worker, events):
+        feedback.extend(event for event in events if event.stage == 'feedback')
+        return publish(worker, events)
 
-    monkeypatch.setattr(VisualizationWorker, 'publish', capture)
+    monkeypatch.setattr(VisualizationWorker, 'publish_many', capture)
     assert main(['--no-viewer', '--fast', '--steps', '127', '--display-hz', str(hz)]) == 0
     result = json.loads(capsys.readouterr().out)
     end = result['simulation_time']

@@ -4,7 +4,7 @@ import json
 
 import numpy as np
 
-from .control import JointTarget
+from .control import JointTarget, TcpTarget
 from .policy import PolicyChunk, StepRef, StreamEvent
 from .rerun_renderer import RerunRenderer, segment
 
@@ -59,6 +59,29 @@ class _PolicyChannel:
     kind: str | None = None
     selected_points: np.ndarray | None = None
     offsets_text: str = ''
+    submitted: np.ndarray | None = None
+    path_entities: list[str] = field(default_factory=list)
+    selection_dirty: bool = False
+    progress_dirty: bool = False
+    marker_logged: bool = False
+
+
+@dataclass
+class _FeedbackTrail:
+    """A bounded ring of overlapping blocks; sealed coordinates stay untouched."""
+    blocks: dict[int, list] = field(default_factory=dict)
+    dirty: set[int] = field(default_factory=set)
+    slot: int = 0
+    logged: set[int] = field(default_factory=set)
+    endpoint_logged: bool = False
+
+    def append(self, point):
+        block = self.blocks.setdefault(self.slot, [])
+        if len(block) == 64:
+            self.slot = (self.slot + 1) % 32
+            block = self.blocks[self.slot] = [block[-1]]
+        block.append(point)
+        self.dirty.add(self.slot)
 
 
 class PolicyRerunRenderer:
@@ -71,6 +94,8 @@ class PolicyRerunRenderer:
     and expiry is also checked against each received event's host time.
     Explicit groups keep independent reference/telemetry channels in one shared
     scene. Full-robot feedback is rendered once and updates every group's status.
+    Batches preserve all raw events and path samples but draw only the latest
+    pose/selection; immutable reference coordinates are separate from progress.
     """
     def __init__(self, recording, description, *, timeline='sandbox_elapsed', max_age=0.25,
                  shared_view=False, telemetry=False, compact=False, groups=None):
@@ -93,6 +118,9 @@ class PolicyRerunRenderer:
         self._sequence = 0
         self._last_time = -1.0
         self._feedback_paths = {}
+        self._documents = {}
+        self._document_count = 0
+        self._next_document_flush = 0.25
         self._shared_view, self._telemetry = shared_view, telemetry
         self._scene = None
         self._camera_initialized = False
@@ -106,7 +134,7 @@ class PolicyRerunRenderer:
             if self._scene is None:
                 self._scene = rrb.Spatial3DView(origin='world',
                     contents=['/world/**', f'- /{self.robot.instance_path(self.description.instance_id)}/collision/**'],
-                    name='TCP: remaining reference (blue) / target (orange) / simulated history (green)')
+                    name='TCP: remaining reference (blue) / target (orange) / feedback (green)')
             contents = rrb.Horizontal(self._scene, status, column_shares=[4, 1]) if self._telemetry else self._scene
             self.recording.send_blueprint(rrb.Blueprint(contents, rrb.TimePanel(
                 timeline=self.timeline,
@@ -144,6 +172,10 @@ class PolicyRerunRenderer:
         if channel.active is not None and channel.active.chunk_id != c.chunk_id:
             self._clear(channel, channel.active.chunk_id)
         channel.active, channel.selected = c, None
+        channel.submitted = np.zeros(len(c.values), dtype=bool)
+        channel.path_entities.clear()
+        channel.selection_dirty = channel.progress_dirty = False
+        channel.marker_logged = False
         channel.offsets_text = np.array2string(c.time_offsets, precision=2)
         channel.selected_points = c.values[:, :3, 3] if c.kind == 'absolute_tcp_poses' else None
         if view_changed:
@@ -159,6 +191,7 @@ class PolicyRerunRenderer:
         if c.kind == 'absolute_tcp_poses':
             points = c.values[:, :3, 3]
             self._tcp_path(path, points, c)
+            channel.path_entities.append(path)
             for index, pose in enumerate(c.values):
                 if self._shared_view and index not in (0, len(c.values) - 1):
                     continue
@@ -183,6 +216,7 @@ class PolicyRerunRenderer:
                     tool_paths[key].append((transforms[tool.parent_link] @ tool.link_from_tool)[:3, 3])
             for key, points in tool_paths.items():
                 self._tcp_path(f'{path}/preview/{segment(key)}', np.asarray(points), c)
+                channel.path_entities.append(f'{path}/preview/{segment(key)}')
                 if channel.selected_points is None or key == c.group:
                     channel.selected_points = np.asarray(points)
         if (self._shared_view and not self._camera_initialized and
@@ -201,18 +235,110 @@ class PolicyRerunRenderer:
             self._scene.properties.pop('EyeControls3D')
             self._camera_initialized = True
 
-    def _tcp_path(self, path, points, chunk, start=0):
-        points = points[start:]
+    def _tcp_path(self, path, points, chunk):
         labels = [''] * len(points)
         for i in {0, len(labels) - 1}:
-            labels[i] = f'{chunk.chunk_id}[{start + i}] +{chunk.time_offsets[start + i]:.2f}s reference'
+            labels[i] = f'{chunk.chunk_id}[{i}] +{chunk.time_offsets[i]:.2f}s reference'
         frame = self.rr.CoordinateFrame(self.robot.frame_id('world'))
-        self.recording.log(f'{path}/tcp_path', self.rr.LineStrips3D([points],
+        # Separate segments share vertices but have independent progress colors.
+        # Coordinates are written only at chunk availability, never on selection.
+        strips = np.stack((points[:-1], points[1:]), axis=1)
+        self.recording.log(f'{path}/tcp_path', self.rr.LineStrips3D(strips,
             colors=[100, 164, 255], radii=0.006 if self._shared_view else 0.004), frame)
         self.recording.log(f'{path}/steps', self.rr.Points3D(points, colors=[100, 164, 255],
             radii=0.006, labels=labels, show_labels=not self._shared_view), frame)
 
     def consume(self, event: StreamEvent, *, stats=None):
+        self.consume_batch((event,), stats=stats)
+
+    def consume_batch(self, events, *, stats=None):
+        """Record every event, then update the scene once with the latest state."""
+        events = tuple(events)
+        if not events:
+            return
+        feedback = None
+        for event in events:
+            document = self._ingest(event, self._documents)
+            self._document_count += 1
+            if event.state is not None:
+                feedback = event, document
+        if feedback is not None:
+            event, document = feedback
+            now = event.timing.received_at
+            # RobotState.time can be a different source clock. The geometry
+            # uses host receipt time, as does the corresponding metadata row.
+            self.robot.update(self.description.instance_id, replace(event.state, time=now))
+            self.recording.log(f'{self.panel}/rendered_feedback', self.rr.TextDocument(document, media_type='text/plain'))
+            self._draw_feedback_paths()
+        self.recording.set_time(self.timeline, duration=self._last_time)
+        for channel in self._channels.values():
+            self._draw_reference_progress(channel)
+        if not self._shared_view or self._telemetry:
+            self._draw_status(self._last_time, stats)
+        if self._last_time >= self._next_document_flush or self._document_count >= 256:
+            self._flush_documents()
+
+    def _flush_documents(self):
+        # Text history has no animation deadline. Batch its small records while
+        # preserving every source timestamp and sequence, including on close.
+        for path, rows in self._documents.items():
+            times, sequences, texts = zip(*rows)
+            self.recording.send_columns(path, indexes=[
+                self.rr.TimeColumn(self.timeline, duration=times),
+                self.rr.TimeColumn('event_sequence', sequence=sequences)],
+                columns=self.rr.TextDocument.columns(text=texts, media_type=['text/plain'] * len(texts)))
+        self._documents.clear()
+        self._document_count = 0
+        self._next_document_flush = self._last_time + 0.25
+
+    def _draw_reference_progress(self, channel):
+        if channel.active is None:
+            return
+        if channel.progress_dirty:
+            mask = channel.submitted
+            # Hide submitted instances without resending their coordinates.
+            point_radii = np.where(mask, 0., .006)
+            line_radii = np.where(mask[:-1] & mask[1:], 0., .006 if self._shared_view else .004)
+            for path in channel.path_entities:
+                self.recording.log(f'{path}/steps', self.rr.Points3D.from_fields(radii=point_radii))
+                self.recording.log(f'{path}/tcp_path', self.rr.LineStrips3D.from_fields(radii=line_radii))
+            channel.progress_dirty = False
+        if channel.selection_dirty and channel.selected_points is not None:
+            ref = channel.selected
+            path = f'{channel.root}/chunks/{segment(ref.chunk_id)}/prediction/selected'
+            point = [channel.selected_points[ref.step_index]]
+            if channel.marker_logged:
+                self.recording.log(path, self.rr.Points3D.from_fields(positions=point))
+            else:
+                self.recording.log(path, self.rr.Points3D(point,
+                    colors=[255, 187, 65], radii=0.008, show_labels=False),
+                    self.rr.CoordinateFrame(self.robot.frame_id('world')))
+                channel.marker_logged = True
+            channel.selection_dirty = False
+
+    def _draw_feedback_paths(self):
+        frame = self.rr.CoordinateFrame(self.robot.frame_id('world'))
+        for key, trail in self._feedback_paths.items():
+            path = f'{self.root}/feedback_path/{segment(key)}'
+            for slot in sorted(trail.dirty):
+                block_path = path if slot == 0 else f'{path}/blocks/{slot}'
+                if slot in trail.logged:
+                    self.recording.log(block_path, self.rr.LineStrips3D.from_fields(strips=[trail.blocks[slot]]))
+                else:
+                    self.recording.log(block_path, self.rr.LineStrips3D([trail.blocks[slot]],
+                        colors=[65, 240, 120] if self._shared_view else [65, 210, 150],
+                        radii=0.004 if self._shared_view else 0.003), frame)
+                    trail.logged.add(slot)
+            trail.dirty.clear()
+            point = [trail.blocks[trail.slot][-1]]
+            if trail.endpoint_logged:
+                self.recording.log(f'{path}/current', self.rr.Points3D.from_fields(positions=point))
+            else:
+                self.recording.log(f'{path}/current', self.rr.Points3D(point,
+                    colors=[65, 240, 120], radii=0.006, show_labels=False), frame)
+                trail.endpoint_logged = True
+
+    def _ingest(self, event, documents):
         if None in self._channels:
             channel = self._channels[None]
         elif event.group is None and event.stage == 'feedback':
@@ -230,14 +356,14 @@ class PolicyRerunRenderer:
         self._sequence += 1
         data = event_data(event)
         data['event_sequence'] = self._sequence
-        document = self.rr.TextDocument(json.dumps(data, ensure_ascii=False), media_type='text/plain')
+        document = json.dumps(data, ensure_ascii=False)
         # Keep event history in temporal rows. A new entity per event makes
         # long live recordings progressively slower in the Viewer.
-        self.recording.log(f'{self.panel}/events/log', document)
+        row = now, self._sequence, document
+        documents.setdefault(f'{self.panel}/events/log', []).append(row)
         current_path = f'bookkeeping/{event.stage}' if event.fallback else f'streams/{event.stage}'
         panel = self.panel if channel is None else channel.panel
-        self.recording.log(f'{panel}/{current_path}',
-                          document)
+        documents.setdefault(f'{panel}/{current_path}', []).append(row)
         for ch in self._channels.values():
             if ch.active is not None and now >= ch.active.expires_at:
                 self._clear(ch, ch.active.chunk_id)
@@ -254,13 +380,20 @@ class PolicyRerunRenderer:
             channel.selected = event.ref
             if (channel.active is not None and channel.active.chunk_id == event.ref.chunk_id
                     and channel.selected_points is not None):
-                if channel.active.kind == 'absolute_tcp_poses':
-                    self._tcp_path(f'{channel.root}/chunks/{segment(event.ref.chunk_id)}/prediction',
-                                   channel.selected_points, channel.active, start=event.ref.step_index)
-                self.recording.log(f'{channel.root}/chunks/{segment(event.ref.chunk_id)}/prediction/selected',
-                    self.rr.Points3D([channel.selected_points[event.ref.step_index]],
-                        colors=[255, 187, 65], radii=0.008, show_labels=False),
-                    self.rr.CoordinateFrame(self.robot.frame_id('world')))
+                channel.selection_dirty = True
+        elif (event.stage == 'submitted' and channel.active is not None and event.ref is not None
+                and event.ref.chunk_id == channel.active.chunk_id and event.ref.step_index is not None):
+            command = event.receipt.command
+            chunk = channel.active
+            # A gripper receipt can share the arm's StepRef. Only the actual
+            # reference target changes progress; selection alone is not execution.
+            matches = ((isinstance(command, TcpTarget) and chunk.kind == 'absolute_tcp_poses'
+                        and command.tcp == chunk.tcp) or
+                       (isinstance(command, JointTarget) and chunk.kind == 'absolute_joint_positions'
+                        and command.group == chunk.group))
+            if matches and not channel.submitted[event.ref.step_index]:
+                channel.submitted[event.ref.step_index] = True
+                channel.progress_dirty = True
         if event.stage in ('submitted', 'planned', 'sent', 'feedback'):
             for ch in self._channels.values() if channel is None else (channel,):
                 if event.fallback:
@@ -273,32 +406,16 @@ class PolicyRerunRenderer:
                     # whose current legend would relabel the older segment.
                     self._feedback_paths.clear()
                     self.recording.log(f'{self.root}/feedback_path', self.rr.Clear(recursive=True))
-                # State.time is the SDK's source clock, not a future recording
-                # timestamp. Log current geometry at host receipt instead.
-                self.robot.update(self.description.instance_id, replace(event.state, time=now))
                 self._rendered_feedback = event
-                self.recording.log(f'{self.panel}/rendered_feedback', document)
                 for key, tcp in event.state.tcp_poses.items():
-                    history = self._feedback_paths.setdefault(key, [])
-                    history.append(tcp[:3, 3])
-                    del history[:-2048]
-                    self.recording.log(f'{self.root}/feedback_path/{segment(key)}', self.rr.LineStrips3D(
-                        [history], colors=[65, 240, 120] if self._shared_view else [65, 210, 150],
-                        radii=0.004 if self._shared_view else 0.003),
-                        self.rr.CoordinateFrame(self.robot.frame_id('world')))
-                    self.recording.log(f'{self.root}/feedback_path/{segment(key)}/current',
-                        self.rr.Points3D([tcp[:3, 3]], colors=[65, 240, 120], radii=0.006, show_labels=False),
-                        self.rr.CoordinateFrame(self.robot.frame_id('world')))
-        # In the shared live view, update text alongside the pose/chunk rather
-        # than rebuilding both arms' tables for every submission and fallback.
-        if not self._shared_view or event.stage in ('feedback', 'prediction', 'superseded', 'expired'):
-            self._draw_status(now, stats)
+                    self._feedback_paths.setdefault(key, _FeedbackTrail()).append(tcp[:3, 3])
+        return document
 
     def _draw_status(self, now, stats):
         feedback = self._rendered_feedback
         feedback_origin = feedback.origin if feedback is not None else 'unavailable'
         lines = ['## Policy references / received state',
-                 '', 'Blue: remaining TCP reference in the current chunk. Orange: selected TCP target, not actual position.',
+                 '', 'Blue: remaining TCP reference; submitted points/segments are hidden. Orange: selected TCP target.',
                  f'Green trail / endpoint / robot: received **{feedback_origin}** feedback (TCP history / current state).']
         if feedback is not None:
             age = now - feedback.timing.received_at
@@ -365,5 +482,6 @@ class PolicyRerunRenderer:
         return 'unknown' if timing.source_time is None else f'{timing.source_time:.3f}s ({timing.source_clock})'
 
     def close(self):
+        self._flush_documents()
         self.robot.flush()
         self.recording.disconnect()

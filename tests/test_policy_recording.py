@@ -18,8 +18,10 @@ def rows(chunks, path, component):
     for chunk in chunks:
         batch = chunk.to_record_batch()
         if chunk.entity_path == '/' + path and component in batch.schema.names:
-            values += [v for v in batch.column(component).to_pylist() if v is not None]
-    return values
+            timestamps = batch.column('sandbox_elapsed').cast(pa.int64()).to_pylist()
+            values += [(t, row_id, v) for t, row_id, v in zip(timestamps,
+                batch.column('rerun.controls.RowId').to_pylist(), batch.column(component).to_pylist()) if v is not None]
+    return [value for _, _, value in sorted(values)]
 
 
 def times(chunks, path, component):
@@ -27,7 +29,8 @@ def times(chunks, path, component):
     for chunk in chunks:
         batch = chunk.to_record_batch()
         if chunk.entity_path == '/' + path and component in batch.schema.names:
-            result += batch.column('sandbox_elapsed').cast(pa.int64()).to_pylist()
+            result += [t for t, value in zip(batch.column('sandbox_elapsed').cast(pa.int64()).to_pylist(),
+                                             batch.column(component).to_pylist()) if value is not None]
     return result
 
 
@@ -63,9 +66,12 @@ def test_real_rrd_full_future_at_availability_distinct_streams_and_readonly_repl
     renderer.close()
     chunks = list(RrdReader(recording_path).stream())
     path = f'{renderer.root}/chunks/{segment(c.chunk_id)}/prediction'
-    np.testing.assert_allclose(rows(chunks, f'{path}/tcp_path', 'LineStrips3D:strips')[0][0], poses[:, :3, 3])
-    assert times(chunks, f'{path}/tcp_path', 'LineStrips3D:strips') == [0, 100000000]
-    np.testing.assert_allclose(rows(chunks, f'{path}/tcp_path', 'LineStrips3D:strips')[1][0], poses[1:, :3, 3])
+    np.testing.assert_allclose(rows(chunks, f'{path}/tcp_path', 'LineStrips3D:strips')[0],
+                               np.stack((poses[:-1, :3, 3], poses[1:, :3, 3]), axis=1))
+    assert times(chunks, f'{path}/tcp_path', 'LineStrips3D:strips') == [0]
+    assert times(chunks, f'{path}/steps', 'Points3D:positions') == [0]
+    radii = rows(chunks, f'{path}/steps', 'Points3D:radii')[-1]
+    assert radii[0] == radii[2] > radii[1] == 0
     assert times(chunks, f'{path}/axes/2', 'Transform3D:translation') == [0]
     assert rows(chunks, path, 'Clear:is_recursive') == [[True]]
     path2 = f'{renderer.root}/chunks/second/prediction'
@@ -110,9 +116,8 @@ def test_event_history_keeps_bounded_entities_and_same_time_event_order(tmp_path
     path = tmp_path / 'event-history.rrd'
     recording = rr.RecordingStream('event-history'); recording.save(path)
     renderer = PolicyRerunRenderer(recording, RobotDescription('history', robot_urdf, names))
-    for index in range(100):
-        renderer.consume(StreamEvent('planned', SampleTime(0), 'simulated',
-            command=JointTarget('arm', dict.fromkeys(names, index / 100))))
+    renderer.consume_batch([StreamEvent('planned', SampleTime(0), 'simulated',
+        command=JointTarget('arm', dict.fromkeys(names, index / 100))) for index in range(100)])
     renderer.close()
     chunks = list(RrdReader(path).stream())
     event_paths = {chunk.entity_path for chunk in chunks if '/events/' in chunk.entity_path}
@@ -121,3 +126,72 @@ def test_event_history_keeps_bounded_entities_and_same_time_event_order(tmp_path
     history.sort(key=lambda event: event['event_sequence'])
     assert [event['event_sequence'] for event in history] == list(range(1, 101))
     assert [event['command']['positions'][names[0]] for event in history] == [i / 100 for i in range(100)]
+
+
+def test_batched_selection_hides_submitted_geometry_and_updates_latest_marker(tmp_path, robot_urdf, names):
+    path = tmp_path / 'progress.rrd'
+    recording = rr.RecordingStream('progress'); recording.save(path)
+    renderer = PolicyRerunRenderer(recording, RobotDescription('progress', robot_urdf, names), shared_view=True)
+    poses = np.tile(np.eye(4), (4, 1, 1)); poses[:, 0, 3] = np.arange(4)
+    chunk = PolicyChunk('A', 'arm', names, [0, 1, 2, 3], poses,
+                        SampleTime(0), 10, 'absolute_tcp_poses', 'world', 'tool')
+    events = [StreamEvent('prediction', chunk.timing, 'reference', chunk=chunk)]
+    for i in (0, 1, 3):
+        ref = StepRef('A', i)
+        events.append(StreamEvent('selection', SampleTime(i), 'reference', ref))
+        # Selecting step 3 and submitting its gripper must not claim the TCP
+        # was submitted, or mark skipped step 2 as completed.
+        target = chunk.target(i) if i < 3 else JointTarget('gripper', {'finger': .1})
+        events.append(StreamEvent('submitted', SampleTime(i), 'reference', ref,
+                                  receipt=SubmissionReceipt(i + 1, 'policy', target)))
+    renderer.consume_batch(events)
+    renderer.close()
+    recorded = list(RrdReader(path).stream())
+    prefix = f'{renderer.root}/chunks/A/prediction'
+    assert len(rows(recorded, prefix + '/tcp_path', 'LineStrips3D:strips')) == 1
+    assert len(rows(recorded, prefix + '/steps', 'Points3D:positions')) == 1
+    radii = rows(recorded, prefix + '/steps', 'Points3D:radii')
+    assert len(radii) == 2
+    np.testing.assert_allclose(radii[-1], [0, 0, .006, .006])
+    line_radii = rows(recorded, prefix + '/tcp_path', 'LineStrips3D:radii')[-1]
+    np.testing.assert_allclose(line_radii, [0, .006, .006])
+    np.testing.assert_allclose(rows(recorded, prefix + '/selected', 'Points3D:positions'), [[[3, 0, 0]]])
+    assert len(rows(recorded, renderer.panel + '/events/log', 'TextDocument:text')) == len(events)
+
+
+def test_batched_feedback_keeps_all_samples_and_bounded_incremental_trail(tmp_path, robot_urdf, names):
+    path = tmp_path / 'trail.rrd'
+    recording = rr.RecordingStream('trail'); recording.save(path)
+    renderer = PolicyRerunRenderer(recording, RobotDescription('trail', robot_urdf, names),
+                                   shared_view=True, compact=True)
+    count = 2240
+    for start in range(0, count, 64):
+        events = []
+        for i in range(start, start + 64):
+            pose = np.eye(4); pose[0, 3] = i
+            state = RobotState(i, dict.fromkeys(names, 0), tcp_poses={'tool': pose})
+            events.append(StreamEvent('feedback', SampleTime(i / 30), 'simulated', state=state))
+        renderer.consume_batch(events)
+    assert renderer.robot.update_count == count // 64
+    renderer.close()
+    recorded = list(RrdReader(path).stream())
+    raw = rows(recorded, renderer.panel + '/streams/feedback', 'TextDocument:text')
+    assert len(raw) == count  # Batching reduces draws, never raw evidence.
+    prefix = '/' + renderer.root + '/feedback_path/tool'
+    blocks, total_points = {}, 0
+    for chunk in recorded:
+        batch = chunk.to_record_batch()
+        if chunk.entity_path.startswith(prefix) and 'LineStrips3D:strips' in batch.schema.names:
+            for time, value in zip(batch.column('sandbox_elapsed').cast(pa.int64()).to_pylist(),
+                                   batch.column('LineStrips3D:strips').to_pylist()):
+                if value is not None:
+                    assert len(value[0]) <= 64
+                    total_points += len(value[0])
+                    if time >= blocks.get(chunk.entity_path, (-1,))[0]:
+                        blocks[chunk.entity_path] = time, value[0]
+    assert len(blocks) == 32 and total_points < 4 * count
+    edges = {(int(a[0]), int(b[0])) for _, points in blocks.values() for a, b in zip(points, points[1:])}
+    first = min(a for a, _ in edges)
+    assert first > 0 and edges == {(i, i + 1) for i in range(first, count - 1)}
+    endpoint = rows(recorded, renderer.root + '/feedback_path/tool/current', 'Points3D:positions')[-1]
+    np.testing.assert_allclose(endpoint, [[count - 1, 0, 0]])

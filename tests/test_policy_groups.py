@@ -23,7 +23,7 @@ def test_two_policy_groups_keep_both_paths_selections_and_telemetry(tmp_path, ro
     path = tmp_path / 'dual.rrd'
     recording.save(path)
     renderer = PolicyRerunRenderer(recording, RobotDescription('dual', robot_urdf, names),
-                                   shared_view=True, groups=('left', 'right'))
+                                   shared_view=True, telemetry=True, groups=('left', 'right'))
     chunks = {}
     for side, x in [('left', 1.), ('right', -1.)]:
         poses = np.tile(np.eye(4), (2, 1, 1))
@@ -58,10 +58,9 @@ def test_two_policy_groups_keep_both_paths_selections_and_telemetry(tmp_path, ro
         np.testing.assert_allclose(rows(recorded, prefix + '/selected', 'Points3D:positions')[0][0], chunk.values[1, :3, 3])
         assert rows(recorded, prefix + '/selected', 'Points3D:labels') == []
         assert rows(recorded, prefix + '/selected', 'Points3D:show_labels') == [[False]]
-        # The full reference is retained in the first record; after selection
-        # the blue geometry contains only the remaining points.
-        np.testing.assert_allclose(rows(recorded, prefix + '/tcp_path', 'LineStrips3D:strips')[-1][0],
-                                   chunk.values[1:, :3, 3])
+        # Selecting a target does not resend coordinates or claim submission.
+        assert len(rows(recorded, prefix + '/tcp_path', 'LineStrips3D:strips')) == 1
+        assert len(rows(recorded, prefix + '/steps', 'Points3D:colors')) == 1
         planned = rows(recorded, f'{renderer.panel}/groups/{side}/streams/planned', 'TextDocument:text')
         assert json.loads(planned[0][0])['command']['group'] == side
     assert rows(recorded, f'{renderer.root}/groups/left/chunks/left-A/prediction', 'Clear:is_recursive') == [[True]]
