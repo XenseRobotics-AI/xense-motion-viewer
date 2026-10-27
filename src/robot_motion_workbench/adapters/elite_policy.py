@@ -63,6 +63,8 @@ def main(argv=None):
     length.add_argument('--steps', type=int, help='Limit native steps; recorded data stops at episode end')
     length.add_argument('--duration', type=float, help='Limit playback seconds; default is the full episode')
     parser.add_argument('--queue-capacity', type=int, default=128)
+    parser.add_argument('--display-hz', type=int, choices=(30, 60), default=30,
+                        help='State sampling frequency in simulation time (default: 30 Hz)')
     viewers = parser.add_mutually_exclusive_group()
     viewers.add_argument('--viewer', dest='viewer', action='store_true')
     viewers.add_argument('--no-viewer', dest='viewer', action='store_false')
@@ -112,6 +114,7 @@ def main(argv=None):
     policies = {side: PolicyInput(inputs, lambda event, side=side: worker.publish(replace(event, group=side)))
                 for side in arms}
     initial = session.snapshot()
+    next_display = initial.time + 1 / args.display_hz
     refs = dict.fromkeys(arms)
     submissions = []
     last_indices = dict.fromkeys(arms)
@@ -180,9 +183,14 @@ def main(argv=None):
                     last_indices[side] = index
             adapter.step()  # native StationSimulation.step; SDK owner thread only
             completed += 1
-            if step % 10 == 9 or step == steps - 1:
+            now = max(arm.time for arm in simulation.arms.values())
+            if now >= next_display or step == steps - 1:
                 state = session.snapshot()
                 now = state.time
+                # Keep deadlines on the requested time grid, rather than
+                # accumulating the native step's rounding error each frame.
+                # Emit the latest state once if a step crosses multiple slots.
+                next_display = initial.time + (int((now - initial.time) * args.display_hz) + 1) / args.display_hz
                 # Native planner q is an observable simulation reference, not
                 # a transport callback or a successful setter's return value.
                 timing = SampleTime(now, state.time, 'elite_simulation')
@@ -209,7 +217,7 @@ def main(argv=None):
                                         for n in session.capabilities.groups[side]) for side in arms},
         final_gripper_openings={side: adapter.grippers.opening(side) for side in arms},
         simulation_time=final.time, wall_seconds=time.perf_counter() - wall_start, paced=not args.fast,
-        shared_3d_view=True, submissions=submissions, display=stats,
+        shared_3d_view=True, display_hz=args.display_hz, submissions=submissions, display=stats,
         display_closed=closed, sent='unavailable: no transport send telemetry',
         reference_source=reference_source,
         origin=f'offline simulated response / {source} reference', hardware_connections=0)

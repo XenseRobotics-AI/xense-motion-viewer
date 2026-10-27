@@ -44,6 +44,7 @@ Policy 默认播放包内 episode 0：4451 帧、30 Hz、约 148 秒，左右臂
 | --- | --- |
 | `--station diagonal-07` / `--station diagonal-08` | 选择站点；未提供 recipe 时默认 `diagonal-08` |
 | `--recipe path.yaml` | 使用 SDK 的站点与工具配置，须与显式指定的站点一致 |
+| `--display-hz 30` / `--display-hz 60` | Qt / Policy 目标显示频率，默认 30 Hz；不改变动作输入频率或原生仿真步长 |
 | `--arm left` / `--arm right` | Policy 只播放单臂；默认 `both` |
 | `--duration 12` | Policy 只播放前 12 秒 |
 | `--source synthetic` / `--kind joint` | Policy 使用手写 TCP / 关节参考；采集数据没有关节角 |

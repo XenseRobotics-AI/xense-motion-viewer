@@ -59,6 +59,10 @@ rmw-elite-policy --trajectory recordings/episode-1.npz
 TCP 是配置工具坐标系的世界位置，不是某根手指的尖端；夹爪开合不改变 TCP 定义。
 `--telemetry` 增加文本状态栏。
 
+`--display-hz 30`（默认）或 `--display-hz 60` 设置状态采样频率，按仿真时间调度。
+在跨过采样时刻的第一个原生步读取当前状态，结束时补齐最终状态；不改变动作提交和仿真步长。
+`--fast` 仍按仿真时间采样，实际显示频率受显示线程和 Viewer 处理速度影响。
+
 prediction、selection、submitted、planned、sent、feedback 分别存储。
 采集动作标为 `reference`，原生规划值和反馈标为 `simulated`；
 采集的 `observation.state` 不会被当成当前仿真反馈。

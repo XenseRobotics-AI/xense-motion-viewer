@@ -91,6 +91,41 @@ def test_bundled_episode_preserves_source_values_and_needs_no_mount():
 
 
 @pytest.mark.elite
+@pytest.mark.parametrize(('hz', 'period'), [(30, .004), (60, .008)])
+def test_display_samples_follow_time_grid_and_include_final_state(monkeypatch, capsys, hz, period):
+    pytest.importorskip('libpyelite')
+    pytest.importorskip('rerun')
+    from libpyelite.sim import StationSimulation
+    from robot_motion_workbench.adapters import elite
+    from robot_motion_workbench.adapters.elite_policy import main
+    from robot_motion_workbench.streams import VisualizationWorker
+
+    settings = dict(StationSimulation().settings, servoj_time=period)
+    simulation = StationSimulation(settings=settings, collision_profile='auto')
+    native_period = simulation.arms['left'].config.period
+    monkeypatch.setattr(elite, '_simulation', lambda args: simulation)
+    feedback = []
+    publish = VisualizationWorker.publish
+
+    def capture(worker, event):
+        if event.stage == 'feedback':
+            feedback.append(event)
+        return publish(worker, event)
+
+    monkeypatch.setattr(VisualizationWorker, 'publish', capture)
+    assert main(['--no-viewer', '--fast', '--steps', '127', '--display-hz', str(hz)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    end = result['simulation_time']
+    # Every requested time maps to the first native state at or after it.
+    # The last step is sampled even when it lies between regular deadlines.
+    grid = np.arange(1, int(end * hz) + 1) / hz
+    expected = np.r_[0., np.ceil(grid / native_period) * native_period, end]
+    np.testing.assert_allclose([e.state.time for e in feedback], expected, atol=1e-9)
+    assert result['display_hz'] == hz
+    assert dict(feedback[-1].state.joint_positions) == result['final_joints']
+
+
+@pytest.mark.elite
 @pytest.mark.parametrize('arm', ['both', 'left', 'right'])
 def test_cli_submits_recorded_actions_at_source_times_across_chunk_boundary(tmp_path, capsys, monkeypatch, arm):
     pytest.importorskip('libpyelite')
