@@ -53,8 +53,9 @@ def tick():
             assert entered.is_set()
             assert not np.array_equal(sim.q, before), 'Native motion stopped with blocked display'
             window.render_timer.stop()
+            before_reset_time = view._last_state.time
             window._reset_home(); window.render_timer.stop(); window.advance(4)
-            assert view._last_state.time >= .6
+            assert view._last_state.time >= before_reset_time, 'Display time moved backwards after reset'
             toggle.setChecked(True)
             timer.stop(); release.set(); app.quit()
     except Exception as exc:
