@@ -172,16 +172,35 @@ def test_compact_recording_preserves_fk_base_mimics_tools_and_exact_collision_ba
     assert renderer._spatial_view.id == view_id
     recording.flush(); recording.disconnect()
     placements = model.link_transforms(moved, override)
-    local, parents = {}, {}
+    local, parents, latest = {}, {}, {}
+    descriptors = [column.component_descriptor() for column in
+                   rr.Transform3D.columns(translation=[[0, 0, 0]], mat3x3=[np.eye(3)],
+                       parent_frame=['parent'], child_frame=['child'],
+                       relation=[rr.TransformRelation.ParentFromChild])]
     for chunk in RrdReader(path).stream():
         batch = chunk.to_record_batch()
         if 'Transform3D:mat3x3' not in batch.schema.names:
             continue
-        for rotation, translation, parent in zip(batch.column('Transform3D:mat3x3').to_pylist(),
-                batch.column('Transform3D:translation').to_pylist(), batch.column('Transform3D:parent_frame').to_pylist(), strict=True):
-            pose = np.eye(4); pose[:3, :3] = np.array(rotation[0]).reshape(3, 3, order='F'); pose[:3, 3] = translation[0]
-            local[chunk.entity_path] = pose
+        # Numeric columns alone are insufficient: the Viewer recognizes a
+        # transform by its complete descriptor, including type and archetype.
+        for descriptor in descriptors:
+            metadata = batch.schema.field(descriptor.component).metadata
+            assert metadata[b'rerun:component_type'] == descriptor.component_type.encode()
+            assert metadata[b'rerun:archetype'] == descriptor.archetype.encode()
+        parent_rows = batch.column('Transform3D:parent_frame').to_pylist()
+        timestamps = (batch.column('simulation').cast('int64').to_pylist()
+                      if 'simulation' in batch.schema.names else [-1] * batch.num_rows)
+        for timestamp, rotation, translation, parent in zip(timestamps, batch.column('Transform3D:mat3x3').to_pylist(),
+                batch.column('Transform3D:translation').to_pylist(), parent_rows, strict=True):
+            if rotation is None:
+                continue
+            # The named-frame graph needs the edge identity on each pose row.
+            assert parent is not None
             parents[chunk.entity_path] = '/' + parent[0].removeprefix('tf#/')
+            pose = np.eye(4); pose[:3, :3] = np.array(rotation[0]).reshape(3, 3, order='F'); pose[:3, 3] = translation[0]
+            if timestamp >= latest.get(chunk.entity_path, -1):
+                local[chunk.entity_path] = pose
+                latest[chunk.entity_path] = timestamp
     def world(path):
         return np.eye(4) if path == '/world' else world(parents[path]) @ local[path]
     for n, expected in placements.items():

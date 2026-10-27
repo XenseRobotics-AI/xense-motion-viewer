@@ -1,11 +1,14 @@
 """Rerun output adapter. SDK import and geometry loading occur only on use."""
 
+from functools import lru_cache
+
 import numpy as np
 
 from .contracts import AttachedMesh, RobotDescription, RobotState
 from .urdf import URDFModel
 
 
+@lru_cache(maxsize=1024)
 def segment(value):
     import rerun as rr
     return rr.escape_entity_path_part(value)
@@ -128,11 +131,43 @@ class RerunRenderer:
             self.collision_batches[f'{instance}/{name}'] = tuple(mesh.name for mesh in meshes)
         return tuple(result)
 
-    def _changed_transform(self, path, pose, parent='world'):
+    def _changed_transform(self, path, pose, updates, parent='world'):
         previous = self._last_poses.get(path)
         if previous is None or not np.array_equal(previous, pose):
-            self._transform(path, pose, parent)
+            if previous is None:
+                self._transform(path, pose, parent)
+            else:
+                # Named-frame transforms must retain their frame identities on
+                # every row. A pose-only row does not update the same graph edge.
+                updates.append((path, pose, parent))
             self._last_poses[path] = pose.copy()
+
+    def _send_transforms(self, updates, time):
+        """Encode all changed poses together and send them in one SDK call."""
+        if not updates:
+            return
+        import pyarrow as pa
+        poses = np.stack([pose for _, pose, _ in updates])
+        columns = self.rr.Transform3D.columns(translation=poses[:, :3, 3], mat3x3=poses[:, :3, :3],
+            parent_frame=[self.frame_id(parent) for _, _, parent in updates],
+            child_frame=[self.frame_id(path) for path, _, _ in updates],
+            relation=[self.rr.TransformRelation.ParentFromChild] * len(updates))
+        arrays = [pa.array([round(time * 1e9)], type=pa.duration('ns'))]
+        fields = [pa.field(self.timeline, arrays[0].type)]
+        for column in columns:
+            values = column.as_arrow_array()
+            descriptor = column.component_descriptor()
+            component = descriptor.component
+            for index, (path, _, _) in enumerate(updates):
+                arrays.append(values.slice(index, 1))
+                # A matching column name is not enough for Viewer transforms:
+                # retain the SDK's complete descriptor when splitting entities.
+                fields.append(pa.field(f'{path}:{component}', values.type, metadata={
+                    'rerun:entity_path': path, 'rerun:component': component,
+                    'rerun:component_type': descriptor.component_type,
+                    'rerun:archetype': descriptor.archetype}))
+        self.recording.send_record_batch(pa.RecordBatch.from_arrays(arrays, schema=pa.schema(fields)),
+                                         index=self.timeline)
 
     def update(self, instance_id: str, state: RobotState):
         model = self._models[instance_id]
@@ -163,12 +198,13 @@ class RerunRenderer:
     def _update_compact(self, instance, state, model):
         self.recording.set_time(self.timeline, duration=state.time)
         root = self.instance_path(instance)
+        updates = []
         base = model.description.base_transform if state.base_transform is None else state.base_transform
-        self._changed_transform(self.link_path(instance, model.root_link), base)
+        self._changed_transform(self.link_path(instance, model.root_link), base, updates)
         values = model.resolve_positions(state.joint_positions)
         for joint in model.ordered_joints:
             if joint.kind != 'fixed':
-                self._changed_transform(self.link_path(instance, joint.child), joint.placement(values[joint.name]),
+                self._changed_transform(self.link_path(instance, joint.child), joint.placement(values[joint.name]), updates,
                                         self.link_path(instance, joint.parent))
         current = {}
         for group, poses, size in [('tcp', state.tcp_poses, 0.035), ('targets', state.targets, 0.045)]:
@@ -178,10 +214,11 @@ class RerunRenderer:
             self.recording.log(path, self.rr.Clear(recursive=True))
             self._last_poses.pop(path, None)
         for path, (pose, size) in current.items():
-            self._changed_transform(path, pose)
+            self._changed_transform(path, pose, updates)
             if path not in self._frames[instance]:
                 self.recording.log(path, self.rr.TransformAxes3D(size), self.rr.CoordinateFrame(self.frame_id(path)))
         self._frames[instance] = set(current)
+        self._send_transforms(updates, state.time)
         self.recording.log(f'{root}/sample', self.rr.AnyValues(elapsed=state.time))
         self._last_times[instance] = state.time
         self.update_count += 1
