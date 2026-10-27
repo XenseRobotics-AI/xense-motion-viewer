@@ -181,6 +181,8 @@ class StreamEvent:
 
     Telemetry association is supplied explicitly by the SDK/host, not inferred
     from timestamps. Feedback without an association is valid and stays so.
+    ``group`` distinguishes concurrent policy channels; full-robot feedback may
+    leave it unset. Group identity also bounds display sample coalescing.
     """
     stage: str
     timing: SampleTime
@@ -194,8 +196,15 @@ class StreamEvent:
     reason: str = ''
     fallback: bool = False
     submission_sequence: int | None = None
+    group: str | None = None
 
     def __post_init__(self):
+        if self.group is not None:
+            name(self.group)
+            if isinstance(self.chunk, PolicyChunk) and self.group != self.chunk.group:
+                raise ValueError('Event group must match its policy chunk')
+            if isinstance(self.command, JointTarget) and self.group != self.command.group:
+                raise ValueError('Event group must match its joint command')
         if self.stage not in ('prediction', 'selection', 'submitted', 'superseded', 'expired', 'planned', 'sent', 'feedback'):
             raise ValueError('Unknown stream stage')
         origin(self.origin)

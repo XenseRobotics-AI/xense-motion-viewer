@@ -58,7 +58,8 @@ class VisualizationWorker:
                 remove = set()
                 for index in range(len(self._queue) - 1, -1, -1):
                     prior = self._queue[index]
-                    if prior.stage != event.stage:
+                    if (prior.stage != event.stage or
+                            getattr(prior, 'group', None) != getattr(event, 'group', None)):
                         continue
                     if not prior.available or prior.origin != event.origin:
                         break  # Preserve every availability/origin boundary.

@@ -64,7 +64,8 @@ def test_real_rrd_full_future_at_availability_distinct_streams_and_readonly_repl
     chunks = list(RrdReader(recording_path).stream())
     path = f'{renderer.root}/chunks/{segment(c.chunk_id)}/prediction'
     np.testing.assert_allclose(rows(chunks, f'{path}/tcp_path', 'LineStrips3D:strips')[0][0], poses[:, :3, 3])
-    assert times(chunks, f'{path}/tcp_path', 'LineStrips3D:strips') == [0]
+    assert times(chunks, f'{path}/tcp_path', 'LineStrips3D:strips') == [0, 100000000]
+    np.testing.assert_allclose(rows(chunks, f'{path}/tcp_path', 'LineStrips3D:strips')[1][0], poses[1:, :3, 3])
     assert times(chunks, f'{path}/axes/2', 'Transform3D:translation') == [0]
     assert rows(chunks, path, 'Clear:is_recursive') == [[True]]
     path2 = f'{renderer.root}/chunks/second/prediction'

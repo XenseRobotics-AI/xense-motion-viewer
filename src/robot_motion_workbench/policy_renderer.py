@@ -1,11 +1,11 @@
 """Read-only Rerun display of full policy references and associated streams."""
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, field, replace
 import json
 
 import numpy as np
 
 from .control import JointTarget
-from .policy import StreamEvent
+from .policy import PolicyChunk, StepRef, StreamEvent
 from .rerun_renderer import RerunRenderer, segment
 
 
@@ -23,6 +23,8 @@ def event_data(event):
                   ref=asdict(event.ref) if event.ref else None, available=event.available,
                   reason=event.reason, command=command_data(event.command), fallback=event.fallback,
                   submission_sequence=event.submission_sequence)
+    if event.group is not None:
+        result['group'] = event.group
     if event.receipt:
         result['receipt'] = dict(sequence=event.receipt.sequence, source=event.receipt.source,
                                  status=event.receipt.status, command=command_data(event.receipt.command))
@@ -44,6 +46,20 @@ def event_data(event):
     return result
 
 
+@dataclass
+class _PolicyChannel:
+    root: str
+    panel: str
+    active: PolicyChunk | None = None
+    selected: StepRef | None = None
+    latest: dict[str, StreamEvent] = field(default_factory=dict)
+    sent_fallback: StreamEvent | None = None
+    status: str = 'No active chunk'
+    preview_provider: str | None = None
+    kind: str | None = None
+    selected_points: np.ndarray | None = None
+
+
 class PolicyRerunRenderer:
     """One display-thread consumer; it receives data, never a robot adapter.
 
@@ -52,9 +68,11 @@ class PolicyRerunRenderer:
     Feedback is logged at host receipt, with source clock retained as metadata.
     Drop-newest display delivery may omit events: the status shows queue stats,
     and expiry is also checked against each received event's host time.
+    Explicit groups keep independent reference/telemetry channels in one shared
+    scene. Full-robot feedback is rendered once and updates every group's status.
     """
     def __init__(self, recording, description, *, timeline='sandbox_elapsed', max_age=0.25,
-                 shared_view=False, telemetry=False, compact=False):
+                 shared_view=False, telemetry=False, compact=False, groups=None):
         import rerun as rr
         self.rr, self.recording = rr, recording
         self.robot = RerunRenderer(recording, timeline=timeline, compact=compact)
@@ -62,45 +80,46 @@ class PolicyRerunRenderer:
         self.description, self.timeline, self.max_age = description, timeline, max_age
         self.root = f'world/policy/{segment(description.instance_id)}'
         self.panel = f'policy/{segment(description.instance_id)}'
-        self._active = None
-        self._selected = None
-        self._latest = {}
+        groups = tuple(groups) if groups is not None else (None,)
+        if not groups or len(set(groups)) != len(groups):
+            raise ValueError('Policy display groups must be nonempty and unique')
+        if len(groups) > 1 and not shared_view:
+            raise ValueError('Multiple policy groups require shared_view=True')
+        self._channels = {group: _PolicyChannel(
+            self.root if group is None else f'{self.root}/groups/{segment(group)}',
+            self.panel if group is None else f'{self.panel}/groups/{segment(group)}') for group in groups}
         self._rendered_feedback = None
-        self._sent_fallback = None
         self._sequence = 0
         self._last_time = -1.0
-        self._status = 'No active chunk'
         self._feedback_paths = {}
-        self._preview_provider = None
-        self._kind = None
         self._shared_view, self._telemetry = shared_view, telemetry
         self._scene = None
-        self._selected_points = None
         self._camera_initialized = False
         self.blueprint()
 
     def blueprint(self):
         import rerun.blueprint as rrb
+        channel = next(iter(self._channels.values()))
         status = rrb.TextDocumentView(origin=f'{self.panel}/status', name='Provenance / selection / freshness')
         if self._shared_view:
             if self._scene is None:
                 self._scene = rrb.Spatial3DView(origin='world',
                     contents=['/world/**', f'- /{self.robot.instance_path(self.description.instance_id)}/collision/**'],
-                    name='Robot + future (blue) / selected (orange) / received (green)')
+                    name='TCP: remaining reference (blue) / target (orange) / simulated history (green)')
             contents = rrb.Horizontal(self._scene, status, column_shares=[4, 1]) if self._telemetry else self._scene
-            self.recording.send_blueprint(rrb.Blueprint(contents, collapse_panels=True))
+            self.recording.send_blueprint(rrb.Blueprint(contents))
             return
-        tcp = segment(self._active.tcp) if self._active is not None and self._active.tcp else '*'
+        tcp = segment(channel.active.tcp) if channel.active is not None and channel.active.tcp else '*'
         eye = None
-        if self._active is not None and self._active.kind == 'absolute_tcp_poses':
-            center = self._active.values[:, :3, 3].mean(axis=0)
-            extent = max(float(np.ptp(self._active.values[:, :3, 3], axis=0).max()), 0.1)
+        if channel.active is not None and channel.active.kind == 'absolute_tcp_poses':
+            center = channel.active.values[:, :3, 3].mean(axis=0)
+            extent = max(float(np.ptp(channel.active.values[:, :3, 3], axis=0).max()), 0.1)
             eye = rrb.EyeControls3D(position=center + extent * np.array([1.4, -1.8, 1.6]),
                                    look_target=center, eye_up=[0, 0, 1])
-        reference = (rrb.Spatial2DView(origin=f'{self.panel}/joint_reference',
+        reference = (rrb.Spatial2DView(origin=f'{channel.panel}/joint_reference',
                      name='Full joint chunk: offset (s) / SI position')
-                     if self._kind == 'absolute_joint_positions' else
-                     rrb.Spatial3DView(origin='world', contents=[f'/{self.root}/chunks/**',
+                     if channel.kind == 'absolute_joint_positions' else
+                     rrb.Spatial3DView(origin='world', contents=[f'/{channel.root}/chunks/**',
                          f'/{self.root}/feedback_path/{tcp}',
                          f'/{self.robot.instance_path(self.description.instance_id)}/tcp/{tcp}/**'],
                          eye_controls=eye,
@@ -110,25 +129,25 @@ class PolicyRerunRenderer:
             rrb.Spatial3DView(origin='world', contents=['/world/**',
                 f'- /{self.robot.instance_path(self.description.instance_id)}/collision/**'],
                 name='Current robot + full future reference'),
-            right, column_shares=[3, 2]), collapse_panels=True))
+            right, column_shares=[3, 2])))
 
-    def _clear(self, chunk_id):
-        self.recording.log(f'{self.root}/chunks/{segment(chunk_id)}/prediction', self.rr.Clear(recursive=True))
-        self.recording.log(f'{self.panel}/joint_reference', self.rr.Clear(recursive=True))
+    def _clear(self, channel, chunk_id):
+        self.recording.log(f'{channel.root}/chunks/{segment(chunk_id)}/prediction', self.rr.Clear(recursive=True))
+        self.recording.log(f'{channel.panel}/joint_reference', self.rr.Clear(recursive=True))
 
-    def _prediction(self, event):
+    def _prediction(self, event, channel):
         c = event.chunk
-        view_changed = self._kind != c.kind or (self._active is not None and self._active.tcp != c.tcp)
-        if self._active is not None and self._active.chunk_id != c.chunk_id:
-            self._clear(self._active.chunk_id)
-        self._active, self._selected = c, None
-        self._selected_points = c.values[:, :3, 3] if c.kind == 'absolute_tcp_poses' else None
+        view_changed = channel.kind != c.kind or (channel.active is not None and channel.active.tcp != c.tcp)
+        if channel.active is not None and channel.active.chunk_id != c.chunk_id:
+            self._clear(channel, channel.active.chunk_id)
+        channel.active, channel.selected = c, None
+        channel.selected_points = c.values[:, :3, 3] if c.kind == 'absolute_tcp_poses' else None
         if view_changed:
-            self._kind = c.kind
+            channel.kind = c.kind
             self.blueprint()
-        self._preview_provider = event.preview.provider if event.preview else None
-        self._status = f'Active {c.chunk_id}'
-        path = f'{self.root}/chunks/{segment(c.chunk_id)}/prediction'
+        channel.preview_provider = event.preview.provider if event.preview else None
+        channel.status = f'Active {c.chunk_id}'
+        path = f'{channel.root}/chunks/{segment(c.chunk_id)}/prediction'
         self.recording.log(path, self.rr.AnyValues(chunk_id=c.chunk_id, joint_names=list(c.joint_names),
             time_offsets=c.time_offsets, intended_host_times=c.timing.received_at + c.time_offsets,
             action_values=c.values.reshape(-1), action_shape=list(c.values.shape),
@@ -144,7 +163,7 @@ class PolicyRerunRenderer:
                 self.recording.log(axis, self.rr.TransformAxes3D(0.025), self.rr.CoordinateFrame(self.robot.frame_id(axis)))
         else:
             for index, joint in enumerate(c.joint_names):
-                self.recording.log(f'{self.panel}/joint_reference/{segment(joint)}', self.rr.LineStrips2D(
+                self.recording.log(f'{channel.panel}/joint_reference/{segment(joint)}', self.rr.LineStrips2D(
                     [np.column_stack((c.time_offsets, c.values[:, index]))], labels=[joint], show_labels=True))
         if event.preview is not None:
             preview = event.preview
@@ -160,23 +179,29 @@ class PolicyRerunRenderer:
                     tool_paths[key].append((transforms[tool.parent_link] @ tool.link_from_tool)[:3, 3])
             for key, points in tool_paths.items():
                 self._tcp_path(f'{path}/preview/{segment(key)}', np.asarray(points), c)
-                if self._selected_points is None:
-                    self._selected_points = np.asarray(points)
-        if self._shared_view and not self._camera_initialized and self._selected_points is not None:
+                if channel.selected_points is None or key == c.group:
+                    channel.selected_points = np.asarray(points)
+        if (self._shared_view and not self._camera_initialized and
+                all(ch.selected_points is not None for ch in self._channels.values())):
             import rerun.blueprint as rrb
-            # Frame the working arm and its short path together, rather than
+            # Frame the working arms and their short paths together, rather than
             # letting the large table/stand make the reference a few pixels.
-            center = self._selected_points.mean(axis=0)
+            points = np.concatenate([ch.selected_points for ch in self._channels.values()])
+            center = points.mean(axis=0)
+            offset = np.array([.5, -.65, .45])
+            if len(self._channels) > 1:
+                offset *= max(1.5, float(np.ptp(points, axis=0).max()) / .4)
             self._scene.properties['EyeControls3D'] = rrb.EyeControls3D(
-                position=center + [0.5, -0.65, 0.45], look_target=center + [0., 0., .07], eye_up=[0, 0, 1])
+                position=center + offset, look_target=center + [0., 0., .07], eye_up=[0, 0, 1])
             self.blueprint()
             self._scene.properties.pop('EyeControls3D')
             self._camera_initialized = True
 
-    def _tcp_path(self, path, points, chunk):
-        labels = [''] * len(chunk.time_offsets)
+    def _tcp_path(self, path, points, chunk, start=0):
+        points = points[start:]
+        labels = [''] * len(points)
         for i in {0, len(labels) - 1}:
-            labels[i] = f'{chunk.chunk_id}[{i}] +{chunk.time_offsets[i]:.2f}s reference'
+            labels[i] = f'{chunk.chunk_id}[{start + i}] +{chunk.time_offsets[start + i]:.2f}s reference'
         frame = self.rr.CoordinateFrame(self.robot.frame_id('world'))
         self.recording.log(f'{path}/tcp_path', self.rr.LineStrips3D([points],
             colors=[100, 164, 255], radii=0.006 if self._shared_view else 0.004), frame)
@@ -184,6 +209,15 @@ class PolicyRerunRenderer:
             radii=0.006, labels=labels, show_labels=not self._shared_view), frame)
 
     def consume(self, event: StreamEvent, *, stats=None):
+        if None in self._channels:
+            channel = self._channels[None]
+        elif event.group is None and event.stage == 'feedback':
+            channel = None  # One station snapshot covers all groups.
+        else:
+            try:
+                channel = self._channels[event.group]
+            except KeyError as exc:
+                raise ValueError(f'Unknown policy display group: {event.group!r}') from exc
         now = event.timing.received_at
         if now < self._last_time:
             raise ValueError('Display host time moved backwards')
@@ -194,33 +228,38 @@ class PolicyRerunRenderer:
         self.recording.log(f'{self.panel}/events/{self._sequence:08d}',
                           self.rr.TextDocument(json.dumps(data, ensure_ascii=False), media_type='text/plain'))
         current_path = f'bookkeeping/{event.stage}' if event.fallback else f'streams/{event.stage}'
-        self.recording.log(f'{self.panel}/{current_path}',
+        panel = self.panel if channel is None else channel.panel
+        self.recording.log(f'{panel}/{current_path}',
                           self.rr.TextDocument(json.dumps(data, ensure_ascii=False), media_type='text/plain'))
-        if self._active is not None and now >= self._active.expires_at:
-            self._clear(self._active.chunk_id)
-            self._status = f'Expired {self._active.chunk_id}; previously submitted targets are SDK-owned'
-            self._active, self._selected = None, None
+        for ch in self._channels.values():
+            if ch.active is not None and now >= ch.active.expires_at:
+                self._clear(ch, ch.active.chunk_id)
+                ch.status = f'Expired {ch.active.chunk_id}; previously submitted targets are SDK-owned'
+                ch.active, ch.selected = None, None
         if event.stage == 'prediction':
-            self._prediction(event)
+            self._prediction(event, channel)
         elif event.stage in ('superseded', 'expired'):
-            self._status = f'{event.stage}: {event.ref.chunk_id}'
-            if self._active is not None and self._active.chunk_id == event.ref.chunk_id:
-                self._clear(event.ref.chunk_id)
-                self._active, self._selected = None, None
+            channel.status = f'{event.stage}: {event.ref.chunk_id}'
+            if channel.active is not None and channel.active.chunk_id == event.ref.chunk_id:
+                self._clear(channel, event.ref.chunk_id)
+                channel.active, channel.selected = None, None
         elif event.stage == 'selection':
-            self._selected = event.ref
-            if (self._active is not None and self._active.chunk_id == event.ref.chunk_id
-                    and self._selected_points is not None):
-                self.recording.log(f'{self.root}/chunks/{segment(event.ref.chunk_id)}/prediction/selected',
-                    self.rr.Points3D([self._selected_points[event.ref.step_index]],
-                        colors=[255, 187, 65], radii=0.008,
-                        labels=[f'selected [{event.ref.step_index}]'], show_labels=True),
+            channel.selected = event.ref
+            if (channel.active is not None and channel.active.chunk_id == event.ref.chunk_id
+                    and channel.selected_points is not None):
+                if channel.active.kind == 'absolute_tcp_poses':
+                    self._tcp_path(f'{channel.root}/chunks/{segment(event.ref.chunk_id)}/prediction',
+                                   channel.selected_points, channel.active, start=event.ref.step_index)
+                self.recording.log(f'{channel.root}/chunks/{segment(event.ref.chunk_id)}/prediction/selected',
+                    self.rr.Points3D([channel.selected_points[event.ref.step_index]],
+                        colors=[255, 187, 65], radii=0.008, show_labels=False),
                     self.rr.CoordinateFrame(self.robot.frame_id('world')))
         if event.stage in ('submitted', 'planned', 'sent', 'feedback'):
-            if event.fallback:
-                self._sent_fallback = event
-            else:
-                self._latest[event.stage] = event
+            for ch in self._channels.values() if channel is None else (channel,):
+                if event.fallback:
+                    ch.sent_fallback = event
+                else:
+                    ch.latest[event.stage] = event
             if event.state is not None:
                 if self._rendered_feedback is not None and self._rendered_feedback.origin != event.origin:
                     # Never connect simulated and measured points into a path
@@ -241,31 +280,47 @@ class PolicyRerunRenderer:
                         [history], colors=[65, 240, 120] if self._shared_view else [65, 210, 150],
                         radii=0.004 if self._shared_view else 0.003),
                         self.rr.CoordinateFrame(self.robot.frame_id('world')))
+                    self.recording.log(f'{self.root}/feedback_path/{segment(key)}/current',
+                        self.rr.Points3D([tcp[:3, 3]], colors=[65, 240, 120], radii=0.006, show_labels=False),
+                        self.rr.CoordinateFrame(self.robot.frame_id('world')))
         self._draw_status(now, stats)
 
     def _draw_status(self, now, stats):
         feedback = self._rendered_feedback
         feedback_origin = feedback.origin if feedback is not None else 'unavailable'
-        lines = ['## Policy references / received state', '', self._status,
-                 '', f'Blue: future reference. Green / robot: received **{feedback_origin}** feedback.']
+        lines = ['## Policy references / received state',
+                 '', 'Blue: remaining TCP reference in the current chunk. Orange: selected TCP target, not actual position.',
+                 f'Green trail / endpoint / robot: received **{feedback_origin}** feedback (TCP history / current state).']
         if feedback is not None:
             age = now - feedback.timing.received_at
             lines += ['', f'Rendered state: host {feedback.timing.received_at:.3f}s; '
                       f'source {self._source(feedback.timing)}; age {age:.3f}s '
                       f'({feedback.timing.freshness(now, self.max_age)}).']
-        if self._active is not None:
-            c = self._active
+        for group, channel in self._channels.items():
+            if group is not None:
+                lines += ['', f'### {group}']
+            lines += self._channel_status(channel, now)
+        lines += ['', 'Setter success = submission only. Sent unavailable without send telemetry.',
+                  '', 'Freshness = host receipt age. SDK owns motion; display/replay never calls control.']
+        if stats is not None:
+            lines += ['', f'Display: dropped={stats.dropped_full}, pending={stats.pending}, errors={stats.errors} (best effort).']
+        self.recording.log(f'{self.panel}/status', self.rr.TextDocument('\n'.join(lines), media_type='text/markdown'))
+
+    def _channel_status(self, channel, now):
+        lines = ['', channel.status]
+        if channel.active is not None:
+            c = channel.active
             lines += ['', f'**{c.chunk_id}** · {c.kind} · {len(c.values)} steps · {c.origin}',
-                      '', f'Host available {c.timing.received_at:.3f}s · expiry {c.expires_at:.3f}s · selected **{self._selected.step_index if self._selected else "none"}**',
+                      '', f'Host available {c.timing.received_at:.3f}s · expiry {c.expires_at:.3f}s · selected **{channel.selected.step_index if channel.selected else "none"}**',
                       '', f'Offsets {np.array2string(c.time_offsets, precision=2)} s · source {self._source(c.timing)}',
-                      '', f'Joint ghosts: {self._preview_provider}' if self._preview_provider
+                      '', f'Joint ghosts: {channel.preview_provider}' if channel.preview_provider
                       else 'Joint preview unavailable; no inferred IK.']
         lines += ['', '| Stream | Origin / freshness | Association |', '|---|---|---|']
         details = []
         for stage in ('submitted', 'planned', 'sent', 'feedback'):
-            event = self._latest.get(stage)
+            event = channel.latest.get(stage)
             if stage == 'sent' and event is None:
-                event = self._sent_fallback
+                event = channel.sent_fallback
             if event is None:
                 lines.append(f'| {stage} | unavailable | none |')
                 continue
@@ -287,18 +342,14 @@ class PolicyRerunRenderer:
             if event.reason and (not event.available or stage == 'sent'):
                 details.append(f'  Reason: {event.reason}')
         lines += ['', *details]
-        if self._sent_fallback is not None:
-            fallback = self._sent_fallback
+        if channel.sent_fallback is not None:
+            fallback = channel.sent_fallback
             sequence = f' #{fallback.submission_sequence}' if fallback.submission_sequence is not None else ''
             lines += ['', f'Submission return{sequence} at host {fallback.timing.received_at:.3f}s '
                       f'for {fallback.ref.chunk_id}[{fallback.ref.step_index}] supplies no send evidence '
                       '(fallback bookkeeping). Callback telemetry above is independent; '
                       'a chunk/step association alone does not identify a repeated submission.']
-        lines += ['', 'Setter success = submission only. Sent unavailable without send telemetry.',
-                  '', 'Freshness = host receipt age. SDK owns motion; display/replay never calls control.']
-        if stats is not None:
-            lines += ['', f'Display: dropped={stats.dropped_full}, pending={stats.pending}, errors={stats.errors} (best effort).']
-        self.recording.log(f'{self.panel}/status', self.rr.TextDocument('\n'.join(lines), media_type='text/markdown'))
+        return lines
 
     @staticmethod
     def _source(timing):
