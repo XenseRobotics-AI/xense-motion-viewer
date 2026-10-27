@@ -131,8 +131,10 @@ def main(argv=None):
                 elif delay < -.1:
                     next_tick = time.perf_counter()  # Do not race through old wall-clock debt.
                 next_tick += period
-            state = session.snapshot()
-            now = state.time  # explicit offline host clock, advanced by native sim
+            # The native clock is enough to select the next action. Building a
+            # validated full-station snapshot twice per control tick starves
+            # the Python display worker; copy state at the display cadence.
+            now = max(arm.time for arm in simulation.arms.values())
             if trajectory:
                 source_index = trajectory.index_at(now)
                 if source_index >= chunk_end:
@@ -178,8 +180,8 @@ def main(argv=None):
                     last_indices[side] = index
             adapter.step()  # native StationSimulation.step; SDK owner thread only
             completed += 1
-            state = session.snapshot()
             if step % 10 == 9 or step == steps - 1:
+                state = session.snapshot()
                 now = state.time
                 # Native planner q is an observable simulation reference, not
                 # a transport callback or a successful setter's return value.

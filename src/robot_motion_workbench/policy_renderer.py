@@ -58,6 +58,7 @@ class _PolicyChannel:
     preview_provider: str | None = None
     kind: str | None = None
     selected_points: np.ndarray | None = None
+    offsets_text: str = ''
 
 
 class PolicyRerunRenderer:
@@ -107,7 +108,9 @@ class PolicyRerunRenderer:
                     contents=['/world/**', f'- /{self.robot.instance_path(self.description.instance_id)}/collision/**'],
                     name='TCP: remaining reference (blue) / target (orange) / simulated history (green)')
             contents = rrb.Horizontal(self._scene, status, column_shares=[4, 1]) if self._telemetry else self._scene
-            self.recording.send_blueprint(rrb.Blueprint(contents))
+            self.recording.send_blueprint(rrb.Blueprint(contents, rrb.TimePanel(
+                timeline=self.timeline,
+                play_state='following' if not self._camera_initialized else None)))
             return
         tcp = segment(channel.active.tcp) if channel.active is not None and channel.active.tcp else '*'
         eye = None
@@ -141,6 +144,7 @@ class PolicyRerunRenderer:
         if channel.active is not None and channel.active.chunk_id != c.chunk_id:
             self._clear(channel, channel.active.chunk_id)
         channel.active, channel.selected = c, None
+        channel.offsets_text = np.array2string(c.time_offsets, precision=2)
         channel.selected_points = c.values[:, :3, 3] if c.kind == 'absolute_tcp_poses' else None
         if view_changed:
             channel.kind = c.kind
@@ -225,12 +229,15 @@ class PolicyRerunRenderer:
         self.recording.set_time(self.timeline, duration=now)
         self._sequence += 1
         data = event_data(event)
-        self.recording.log(f'{self.panel}/events/{self._sequence:08d}',
-                          self.rr.TextDocument(json.dumps(data, ensure_ascii=False), media_type='text/plain'))
+        data['event_sequence'] = self._sequence
+        document = self.rr.TextDocument(json.dumps(data, ensure_ascii=False), media_type='text/plain')
+        # Keep event history in temporal rows. A new entity per event makes
+        # long live recordings progressively slower in the Viewer.
+        self.recording.log(f'{self.panel}/events/log', document)
         current_path = f'bookkeeping/{event.stage}' if event.fallback else f'streams/{event.stage}'
         panel = self.panel if channel is None else channel.panel
         self.recording.log(f'{panel}/{current_path}',
-                          self.rr.TextDocument(json.dumps(data, ensure_ascii=False), media_type='text/plain'))
+                          document)
         for ch in self._channels.values():
             if ch.active is not None and now >= ch.active.expires_at:
                 self._clear(ch, ch.active.chunk_id)
@@ -270,8 +277,7 @@ class PolicyRerunRenderer:
                 # timestamp. Log current geometry at host receipt instead.
                 self.robot.update(self.description.instance_id, replace(event.state, time=now))
                 self._rendered_feedback = event
-                self.recording.log(f'{self.panel}/rendered_feedback', self.rr.TextDocument(
-                    json.dumps(data, ensure_ascii=False), media_type='text/plain'))
+                self.recording.log(f'{self.panel}/rendered_feedback', document)
                 for key, tcp in event.state.tcp_poses.items():
                     history = self._feedback_paths.setdefault(key, [])
                     history.append(tcp[:3, 3])
@@ -283,7 +289,10 @@ class PolicyRerunRenderer:
                     self.recording.log(f'{self.root}/feedback_path/{segment(key)}/current',
                         self.rr.Points3D([tcp[:3, 3]], colors=[65, 240, 120], radii=0.006, show_labels=False),
                         self.rr.CoordinateFrame(self.robot.frame_id('world')))
-        self._draw_status(now, stats)
+        # In the shared live view, update text alongside the pose/chunk rather
+        # than rebuilding both arms' tables for every submission and fallback.
+        if not self._shared_view or event.stage in ('feedback', 'prediction', 'superseded', 'expired'):
+            self._draw_status(now, stats)
 
     def _draw_status(self, now, stats):
         feedback = self._rendered_feedback
@@ -312,7 +321,7 @@ class PolicyRerunRenderer:
             c = channel.active
             lines += ['', f'**{c.chunk_id}** · {c.kind} · {len(c.values)} steps · {c.origin}',
                       '', f'Host available {c.timing.received_at:.3f}s · expiry {c.expires_at:.3f}s · selected **{channel.selected.step_index if channel.selected else "none"}**',
-                      '', f'Offsets {np.array2string(c.time_offsets, precision=2)} s · source {self._source(c.timing)}',
+                      '', f'Offsets {channel.offsets_text} s · source {self._source(c.timing)}',
                       '', f'Joint ghosts: {channel.preview_provider}' if channel.preview_provider
                       else 'Joint preview unavailable; no inferred IK.']
         lines += ['', '| Stream | Origin / freshness | Association |', '|---|---|---|']

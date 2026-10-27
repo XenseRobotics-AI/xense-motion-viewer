@@ -18,6 +18,8 @@ from robot_motion_workbench.adapters.elite import EliteStationAdapter, EliteSand
 from robot_motion_workbench.rerun_renderer import RerunRenderer
 from robot_motion_workbench.urdf import URDFModel, xyz_rpy
 
+pytestmark = pytest.mark.elite
+
 
 def test_blocked_display_keeps_only_last_state_and_close_is_bounded():
     entered, release = Event(), Event()
@@ -74,10 +76,12 @@ def test_policy_coalesces_pending_feedback_without_discarding_send_or_origin_cha
     worker.publish(feedback(1))
     worker.publish(StreamEvent('sent', SampleTime(1.5), 'reference', reason='Actual send evidence unavailable'))
     worker.publish(feedback(2))
+    worker.publish(feedback(2.5))
     worker.publish(feedback(3, 'measured'))
     worker.publish(feedback(4))
     release.set(); assert worker.close(timeout=1)
-    assert observed == [('feedback', 0., 'simulated'), ('sent', 1.5, 'reference'), ('feedback', 2., 'simulated'),
+    assert observed == [('feedback', 0., 'simulated'), ('feedback', 1., 'simulated'),
+                        ('sent', 1.5, 'reference'), ('feedback', 2.5, 'simulated'),
                         ('feedback', 3., 'measured'), ('feedback', 4., 'simulated')]
     assert worker.stats.coalesced == 1 and worker.stats.errors == 0
 

@@ -64,6 +64,11 @@ class VisualizationWorker:
                     if not prior.available or prior.origin != event.origin:
                         break  # Preserve every availability/origin boundary.
                     remove.add(index)
+                if event.stage == 'feedback' and remove:
+                    # Let the oldest pending pose reach the consumer. Moving
+                    # every pose to the tail can starve animation indefinitely
+                    # while fresh submission events keep arriving.
+                    remove.discard(min(remove))
                 retained = deque(e for index, e in enumerate(self._queue) if index not in remove)
                 self._coalesced += len(self._queue) - len(retained)
                 self._queue = retained

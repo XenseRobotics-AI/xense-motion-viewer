@@ -225,3 +225,48 @@ def test_consumer_error_and_close_discard_are_observable():
     assert worker.stats.errors == 1 and worker.stats.consumed == 1
     assert worker.stats.discarded_close == 2 and worker.stats.dropped_full == 0
     assert worker.stats.pending == 0 and 'bad display' in worker.stats.last_error
+
+
+def test_continuous_telemetry_cannot_starve_pending_feedback():
+    entered, release, done = Event(), Event(), Event()
+    consumed = []
+    sent_count, clock = 0, 4
+
+    def sent(t):
+        return StreamEvent('sent', SampleTime(t), 'reference', reason='No transport sample')
+
+    def feedback(t):
+        return StreamEvent('feedback', SampleTime(t), 'simulated', state=RobotState(t, {'q': t}))
+
+    def consume(event):
+        nonlocal sent_count, clock
+        if not consumed:
+            entered.set()
+            assert release.wait(3)
+        consumed.append(event)
+        if event.stage == 'sent':
+            sent_count += 1
+            if sent_count < 20:
+                # Deterministic continuous producer: every consumed telemetry
+                # event brings more telemetry and a newer robot pose.
+                clock += 2
+                worker.publish(sent(clock - 1))
+                worker.publish(feedback(clock))
+            else:
+                done.set()
+
+    worker = VisualizationWorker(consume, capacity=16, coalesce_feedback=True)
+    try:
+        worker.publish(sent(0))
+        assert entered.wait(2)
+        for event in (feedback(1), sent(2), feedback(3), sent(4)):
+            worker.publish(event)
+        release.set()
+        assert done.wait(3)
+    finally:
+        release.set()
+        assert worker.close(timeout=3)
+    assert next(i for i, event in enumerate(consumed) if event.stage == 'feedback') < 4
+    assert worker.stats.errors == worker.stats.dropped_full == 0
+    times = [event.timing.received_at for event in consumed]
+    assert times == sorted(times)

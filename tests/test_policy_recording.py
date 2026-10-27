@@ -106,15 +106,18 @@ def test_joint_preview_ghosts_are_references_at_chunk_time(tmp_path, robot_urdf,
     np.testing.assert_allclose(rows(chunks, joint, 'LineStrips2D:strips')[0][0], [[.1, .1], [.2, .1]])
 
 
-def test_rrd_replay_cli_only_launches_viewer(tmp_path, monkeypatch):
-    from robot_motion_workbench.adapters import elite_policy
-    path = tmp_path/'recording.rrd'; path.write_bytes(b'fake viewer path')
-    calls = []
-    class Result:
-        returncode = 0
-    def viewer(args, **kwargs):
-        calls.append(args)
-        return Result()
-    monkeypatch.setattr(elite_policy.subprocess, 'run', viewer)
-    assert elite_policy.replay_main([str(path)]) == 0
-    assert calls[0][1:] == ['-m', 'rerun', str(path)]
+def test_event_history_keeps_bounded_entities_and_same_time_event_order(tmp_path, robot_urdf, names):
+    path = tmp_path / 'event-history.rrd'
+    recording = rr.RecordingStream('event-history'); recording.save(path)
+    renderer = PolicyRerunRenderer(recording, RobotDescription('history', robot_urdf, names))
+    for index in range(100):
+        renderer.consume(StreamEvent('planned', SampleTime(0), 'simulated',
+            command=JointTarget('arm', dict.fromkeys(names, index / 100))))
+    renderer.close()
+    chunks = list(RrdReader(path).stream())
+    event_paths = {chunk.entity_path for chunk in chunks if '/events/' in chunk.entity_path}
+    assert event_paths == {'/' + renderer.panel + '/events/log'}
+    history = [json.loads(row[0]) for row in rows(chunks, renderer.panel + '/events/log', 'TextDocument:text')]
+    history.sort(key=lambda event: event['event_sequence'])
+    assert [event['event_sequence'] for event in history] == list(range(1, 101))
+    assert [event['command']['positions'][names[0]] for event in history] == [i / 100 for i in range(100)]

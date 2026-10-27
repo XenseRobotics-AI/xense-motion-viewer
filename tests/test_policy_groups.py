@@ -41,7 +41,17 @@ def test_two_policy_groups_keep_both_paths_selections_and_telemetry(tmp_path, ro
     renderer.consume(StreamEvent('prediction', newer.timing, 'reference', chunk=newer, group='left'))
     assert renderer.robot.update_count == 1  # One full station update, not one per arm.
     renderer.close()
-    recorded = list(RrdReader(path).stream())
+    reader = RrdReader(path)
+    recorded = list(reader.stream())
+    blueprints = [chunk for store in reader.blueprints() for chunk in reader.stream(store=store)]
+    # The live scene must select simulation time and advance on new samples,
+    # even if a previous Viewer recording was paused.
+    assert rows(blueprints, 'time_panel', 'TimePanelBlueprint:timeline')
+    assert all(value == ['sandbox_elapsed'] for value in
+               rows(blueprints, 'time_panel', 'TimePanelBlueprint:timeline'))
+    assert rows(blueprints, 'time_panel', 'TimePanelBlueprint:play_state')
+    assert all(value == [3] for value in
+               rows(blueprints, 'time_panel', 'TimePanelBlueprint:play_state'))
     for side, chunk in chunks.items():
         prefix = f'{renderer.root}/groups/{side}/chunks/{side}-A/prediction'
         np.testing.assert_allclose(rows(recorded, prefix + '/tcp_path', 'LineStrips3D:strips')[0][0], chunk.values[:, :3, 3])
