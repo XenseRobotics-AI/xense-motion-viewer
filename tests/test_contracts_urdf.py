@@ -1,19 +1,8 @@
-import subprocess
-import sys
 import numpy as np
 import pytest
 
 from robot_motion_workbench import RobotDescription, RobotState, ToolFrame
 from robot_motion_workbench.urdf import URDFModel
-
-
-def test_optional_imports_are_lazy():
-    subprocess.run([sys.executable, '-c', '''import sys
-import robot_motion_workbench
-import robot_motion_workbench.adapters.elite
-import robot_motion_workbench.rerun_renderer
-assert not {'rerun','trimesh','libpyelite','PySide6','pinocchio'} & sys.modules.keys()
-'''], check=True)
 
 
 def test_snapshots_are_defensive_and_rigid(robot_urdf, names):

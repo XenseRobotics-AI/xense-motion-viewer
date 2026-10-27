@@ -10,6 +10,4 @@ dist/
 /evidence/
 *.rrd
 /elite-policy.json
-/portable-policy.json
-/portable-qt.json
 /recordings/

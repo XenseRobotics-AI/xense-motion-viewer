@@ -1,6 +1,4 @@
 from dataclasses import FrozenInstanceError
-import importlib.abc
-from pathlib import Path
 import subprocess
 import sys
 
@@ -161,6 +159,7 @@ class Block(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Block())
 from robot_motion_workbench import RobotSession, JointTarget, TcpTarget, CallbackRobotAdapter
 from robot_motion_workbench.adapters.elite import _simulation
+import robot_motion_workbench.rerun_renderer
 from types import SimpleNamespace
 assert not blocked.intersection(sys.modules)
 try:

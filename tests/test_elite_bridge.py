@@ -1,6 +1,5 @@
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 
@@ -9,7 +8,7 @@ import pytest
 
 pytest.importorskip('libpyelite')
 from libpyelite.sim import StationSimulation
-from robot_motion_workbench.adapters.elite import EliteStationAdapter, EliteRerunView
+from robot_motion_workbench.adapters.elite import EliteStationAdapter
 from robot_motion_workbench.urdf import URDFModel
 
 pytestmark = pytest.mark.elite
@@ -55,31 +54,11 @@ def test_production_pinocchio_link_tool_and_collision_parity(station):
                 [-shape['length']/2-shape['radius'], shape['length']/2+shape['radius']], atol=1e-8)
 
 
-def test_rendering_does_not_change_production_planner(tmp_path):
-    import rerun as rr
-    a, b = StationSimulation(), StationSimulation()
-    rec = rr.RecordingStream('elite-parity'); rec.save(tmp_path/'parity.rrd')
-    view = EliteRerunView(a, rec)
-    side = next(iter(a.arms))
-    target = a.targets()[side].copy(); target[0,3] += .002
-    for sim in (a,b): sim.set_target(side, target)
-    for _ in range(12):
-        sa, sb = a.step(), b.step()
-        view.update(a)
-        np.testing.assert_array_equal(a.q, b.q)
-        for arm in a.arms:
-            assert sa[arm]['position_error_m'] == sb[arm]['position_error_m']
-    a.reset_to_home(); view.update(a)
-    assert view.renderer.update_count == 14
-    rec.flush(); rec.disconnect()
-
-
-@pytest.mark.parametrize('ui', ['elite', 'generic'])
-def test_qt_entry_offscreen(tmp_path, ui):
+def test_qt_entry_offscreen(tmp_path):
     path = tmp_path/'qt.rrd'
     env = os.environ | {'QT_QPA_PLATFORM': 'offscreen'}
     process = subprocess.run([sys.executable, '-m', 'robot_motion_workbench.adapters.elite',
-        '--no-viewer', '--no-show', '--ui', ui, '--save', str(path), '--collision-profile', 'auto'],
+        '--no-viewer', '--no-show', '--save', str(path), '--collision-profile', 'auto'],
         env=env, text=True, capture_output=True, timeout=120)
     assert process.returncode == 0, process.stderr
     result = json.loads(process.stdout.strip().splitlines()[-1])

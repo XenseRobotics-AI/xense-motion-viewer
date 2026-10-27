@@ -346,7 +346,7 @@ class EliteRerunView:
 
 
 class EliteSandboxRuntime:
-    """Offline host scheduling, kept outside the generic frontend/controller.
+    """Offline host scheduling shared by the Elite input and display paths.
 
     Uses the production sandbox's bounded elapsed-time catch-up policy, calling
     StationSimulation.step unchanged. This is not a hardware servo loop.
@@ -387,112 +387,10 @@ class EliteSandboxRuntime:
             self.view.update(self.adapter.simulation)
 
 
-def make_generic_qt_window(simulation, view, *, xyz_range=0.3):
-    """Elite host around the public, metadata-driven ControlPanel."""
-    _qt_environment()
-    from PySide6.QtCore import QTimer
-    from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QLabel, QPushButton
-    from ..qt import ControlPanel
-    app = QApplication.instance() or QApplication([])
-    adapter = view.adapter if view else EliteStationAdapter(simulation)
-    if view:
-        view.start_display()
-    session = RobotSession(adapter)
-    inputs = session.activate('qt')
-    runtime = EliteSandboxRuntime(adapter, view)
-    window = QMainWindow()
-    window.setWindowTitle('Elite CS66 FK / IK — Rerun sandbox')
-    window.resize(1050, 900)
-    central = QWidget()
-    layout = QVBoxLayout(central)
-    layout.addWidget(QLabel('Offline Elite simulation · production native planner · no hardware connection'))
-    layout.addWidget(QLabel('Collision guard: ' + ('enabled' if simulation.collision else 'disabled')))
-    panel = ControlPanel(inputs, xyz_range=xyz_range)
-    layout.addWidget(panel)
-    from .elite_gripper import make_gripper_panel
-    gripper_panel = make_gripper_panel(inputs, adapter.grippers,
-        {side: panel.joint_group_boxes[side].layout() for side in simulation.arms},
-        ik_layouts={side: panel.tcp_group_boxes[side].layout() for side in simulation.arms},
-        on_submit=view.follow_live if view else None)
-    for side in simulation.arms:
-        panel.joint_group_boxes[side + '_gripper'].hide()
-    window.gripper_panel = gripper_panel
-    window.ik_gripper_panel = gripper_panel.ik
-    status = QLabel('Observed state comes from simulation; submission does not mean sent or achieved.')
-    status.setWordWrap(True)
-    layout.addWidget(status)
-    open_button = QPushButton('Open Rerun')
-    open_button.setEnabled(view is not None and getattr(view.renderer.recording, '_rmw_server', None) is not None)
-    if view:
-        open_button.clicked.connect(view.open)
-    layout.addWidget(open_button)
-    collision = QPushButton('Show collision envelopes')
-    collision.setCheckable(True)
-    collision.setEnabled(view is not None and simulation.collision is not None)
-    if view:
-        collision.toggled.connect(view.set_collision_visible)
-    layout.addWidget(collision)
-    home = QPushButton('Reset to home · offline simulation reset')
-    layout.addWidget(home)
-    window.setCentralWidget(central)
-    timer = QTimer(window)
-    timer.setInterval(16)
-
-    def display(samples):
-        panel.refresh()
-        gripper_panel.refresh()
-        status.setText('Simulation observations: ' + json.dumps(samples, default=float))
-
-    def advance(steps=4):
-        try:
-            display(runtime.advance(steps))
-        except Exception as exc:
-            timer.stop()
-            status.setText(f'Simulation paused: {exc}; explicit safe reset required.')
-            raise
-
-    def tick():
-        try:
-            display(runtime.poll())
-        except Exception as exc:
-            timer.stop()
-            status.setText(f'Simulation paused: {exc}; explicit safe reset required.')
-
-    def reset():
-        try:
-            if not inputs.active:
-                raise RuntimeError('Qt no longer owns input; simulation reset rejected')
-            runtime.reset_to_home()
-            panel.sync_targets()
-            panel.refresh()
-            gripper_panel.sync()
-            status.setText('Offline simulation reset to checked home configuration.')
-            timer.start()
-        except Exception as exc:
-            status.setText(f'Reset rejected: {exc}')
-
-    home.clicked.connect(reset)
-    timer.timeout.connect(tick)
-    window.panel, window.session, window.runtime = panel, session, runtime
-    window.render_timer, window.advance, window._reset_home = timer, advance, reset
-    window.collision_toggle = collision
-    # Stop host work when the window is closed, even if the caller retains it.
-    def close(event):
-        timer.stop()
-        inputs.close()
-        if view and not view.close(timeout=1.):
-            status.setText('Rerun close timed out; display thread is still draining (control stopped).')
-        event.accept()
-    window.closeEvent = close
-    timer.start()
-    return app, window
-
-
 def make_qt_window(simulation, view, *, xyz_range=0.3):
     """Keep the production Elite sliders; route their targets via RobotSession.
 
-    This deliberately Elite-specific UI is optional SDK code, outside the
-    generic frontend. The facade owns named mapping; no IK is introduced here.
+    The facade owns named mapping; IK remains in the native SDK.
     """
     _qt_environment()
     from libpyelite.sim import _load_qt, make_window
@@ -644,7 +542,6 @@ def _parser(qt=False):
     parser.add_argument('--instance-id', default='elite_station')
     parser.add_argument('--save', type=Path, required=not qt)
     if qt:
-        parser.add_argument('--ui', choices=['elite', 'generic'], default='elite')
         parser.add_argument('--no-viewer', action='store_true')
         parser.add_argument('--no-show', action='store_true', help='Exercise public command/Qt callbacks and exit')
         parser.add_argument('--port', type=int, default=9876)
@@ -662,8 +559,8 @@ def _simulation(args):
     except ImportError as exc:
         raise RuntimeError(
             'Elite requires the current-production-source libpyelite wheel and its dependencies. '
-            'See README.md development/dependencies: install the matching vendor/wheels/libpyelite wheel, '
-            'then python -m pip install "robot-motion-workbench[elite]". '
+            'See README.md installation: install the matching libpyelite wheel, '
+            'then python -m pip install -e ".[elite,rerun,qt]" from the repository. '
             f'A same-version older wheel is insufficient. Original import error: {exc}'
         ) from exc
     settings = None if args.recipe is None else load_recipe(args.recipe)
@@ -789,33 +686,19 @@ def qt_main(argv=None):
     sim = _simulation(args)
     recording = _recording(args.save, viewer_port=None if args.no_viewer else args.port)
     view = EliteRerunView(sim, recording, instance_id=args.instance_id, port=args.port)
-    factory = make_qt_window if args.ui == 'elite' else make_generic_qt_window
-    app, window = factory(sim, view, xyz_range=args.xyz_range)
+    app, window = make_qt_window(sim, view, xyz_range=args.xyz_range)
     if args.no_show:
         window.render_timer.stop()
         side = next(iter(sim.arms))
         before = sim.q.copy()
-        if args.ui == 'generic':
-            panel = window.panel
-            joint = next(iter(panel.joint_editors[side]))
-            editor = panel.joint_editors[side][joint]
-            editor.setValue(editor.value() + np.degrees(0.001))
-            panel.joint_buttons[side].click()
-        else:
-            control = getattr(window, side + '_joints').controls[0]
-            control.spin.setValue(control.value() + np.degrees(0.001))
+        control = getattr(window, side + '_joints').controls[0]
+        control.spin.setValue(control.value() + np.degrees(0.001))
         np.testing.assert_array_equal(sim.q, before)  # input is a target, never a teleport
         assert window.session.last_receipt.status == 'submitted'
         np.testing.assert_allclose(sim.arms[side].joint_target, list(window.session.last_receipt.command.positions.values()))
         window.advance()
-        if args.ui == 'generic':
-            panel.sync_targets()
-            editor = panel.tcp_editors[side]['x']
-            editor.setValue(editor.value() + 0.001)
-            panel.tcp_buttons[side].click()
-        else:
-            control = getattr(window, side + '_pose').controls['x']
-            control.spin.setValue(control.value() + 0.001)
+        control = getattr(window, side + '_pose').controls['x']
+        control.spin.setValue(control.value() + 0.001)
         assert sim.arms[side].joint_target is None
         np.testing.assert_allclose(sim.targets()[side], window.session.last_receipt.command.world_from_tcp, atol=1e-12)
         window.advance()
@@ -835,7 +718,7 @@ def qt_main(argv=None):
         window.advance(130)
         assert view.adapter.grippers.opening('left') == .4
         assert view.adapter.grippers.opening('right') == .6
-        toggle = window.collision_toggle if args.ui == 'generic' else next(
+        toggle = next(
             (button for button in window.findChildren(__import__('PySide6.QtWidgets', fromlist=['QPushButton']).QPushButton)
              if button.text() == '显示碰撞包络'), None)
         if toggle is not None:

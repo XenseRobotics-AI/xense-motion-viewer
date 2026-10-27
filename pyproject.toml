@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "robot-motion-workbench"
 version = "0.4.1"
-description = "Robot-owned sessions, full policy references and asynchronous URDF-to-Rerun visualization"
+description = "Elite CS66 offline motion workbench with Qt control, policy references and Rerun visualization"
 requires-python = ">=3.12"
 dependencies = ["numpy>=2,<3"]
 
@@ -20,12 +20,9 @@ rmw-elite-record = "robot_motion_workbench.adapters.elite:record_main"
 rmw-elite-qt = "robot_motion_workbench.adapters.elite:qt_main"
 rmw-elite-policy = "robot_motion_workbench.adapters.elite_policy:main"
 rmw-policy-replay = "robot_motion_workbench.adapters.elite_policy:replay_main"
-rmw-demo = "robot_motion_workbench.examples.reference:main"
-rmw-demo-qt = "robot_motion_workbench.examples.reference:qt_main"
-rmw-callback-demo = "robot_motion_workbench.examples.callback_sdk:main"
 
 [tool.setuptools.package-data]
-robot_motion_workbench = ["assets/*.urdf", "assets/*.txt", "assets/*.npz"]
+robot_motion_workbench = ["assets/*.npz"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -126,7 +126,7 @@ def make_gripper_panel(inputs, grippers, joint_layouts, *, ik_layouts, on_submit
     """Mount synchronized opening controls below each arm's Joint and IK inputs."""
     from types import SimpleNamespace
     from PySide6.QtCore import Qt, QSignalBlocker
-    from PySide6.QtWidgets import QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget
+    from PySide6.QtWidgets import QDoubleSpinBox, QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget
     box = SimpleNamespace(sliders={}, editors={}, observed={}, rows={}, statuses={})
     box.ik = SimpleNamespace(sliders={}, editors={}, observed={}, rows={}, statuses={})
     panels = (box, box.ik)
@@ -151,7 +151,7 @@ def make_gripper_panel(inputs, grippers, joint_layouts, *, ik_layouts, on_submit
         if on_submit is not None:
             on_submit()
 
-    def add_row(panel, side, parent_layout, *, prefix='', trailing_rows=1):
+    def add_row(panel, side, parent_layout, *, prefix=''):
         row = QWidget()
         row.setObjectName(prefix + side + '_gripper_row')
         layout = QVBoxLayout(row)
@@ -181,17 +181,13 @@ def make_gripper_panel(inputs, grippers, joint_layouts, *, ik_layouts, on_submit
         controls.addWidget(edit)
         feedback.addWidget(observed)
         feedback.addWidget(status, 1)
-        if isinstance(parent_layout, QFormLayout):
-            parent_layout.insertRow(parent_layout.rowCount() - trailing_rows, row)
-        else:
-            parent_layout.addWidget(row)
+        parent_layout.addWidget(row)
         slider.valueChanged.connect(lambda value: submit(side, value / 10))
         edit.valueChanged.connect(lambda value: submit(side, value))
 
     for side in grippers.drivers:
         add_row(box, side, joint_layouts[side])
-        # The generic form ends with observed TCP and its submit button.
-        add_row(box.ik, side, ik_layouts[side], prefix='ik_', trailing_rows=2)
+        add_row(box.ik, side, ik_layouts[side], prefix='ik_')
 
     def refresh():
         for panel in panels:
