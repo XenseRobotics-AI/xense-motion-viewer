@@ -20,14 +20,19 @@ class EliteStationAdapter:
     """Offline targets/state; the existing StationSimulation owns all planning."""
     def __init__(self, simulation, *, instance_id='elite_station'):
         self.simulation = simulation
+        from .elite_gripper import EliteGrippers
+        if not hasattr(simulation, '_rmw_grippers'):
+            simulation._rmw_grippers = EliteGrippers(simulation)
+        self.grippers = simulation._rmw_grippers
         names = tuple(f'{side}_{joint}' for side in simulation.arms for joint in simulation.joint_names)
         # Some source URDFs expand mimic fingers for Pinocchio. Keep exactly the
-        # source model's representation, without introducing gripper commands.
+        # source model's representation; only independent finger joints are commanded.
         import xml.etree.ElementTree as ET
         root = ET.parse(simulation.urdf_path).getroot()
         independent = {j.attrib['name'] for j in root.findall('joint')
                        if j.attrib['type'] != 'fixed' and j.find('mimic') is None}
-        defaults = {n: v for n, v in simulation.assembly.viewer_joint_defaults().items() if n in independent}
+        defaults = {n: v for n, v in simulation.assembly.viewer_joint_defaults().items()
+                    if n in independent and n not in self.grippers.specs}
         meshes = []
         if simulation.collision is not None:
             import trimesh
@@ -50,15 +55,16 @@ class EliteStationAdapter:
                 meshes.append(AttachedMesh(shape['name'], shape['frame'], mesh.vertices, mesh.faces,
                     xyz_rpy(shape['xyz'], shape['rpy']), rgba))
         self._description = RobotDescription(
-            instance_id, simulation.urdf_path, names, joint_defaults=defaults,
+            instance_id, simulation.urdf_path, names + tuple(self.grippers.specs), joint_defaults=defaults,
             tool_frames={side: ToolFrame(f'{side}_tool0', arm.tool) for side, arm in simulation.arms.items()},
             collision_meshes=tuple(meshes),
         )
         self._capabilities = ControlCapabilities(
-            joints={joint: JointControl('rad', limits[0], limits[1], 'deg', 180 / np.pi)
-                    for joint, limits in zip(names, simulation.joint_limits, strict=True)},
-            groups={side: tuple(f'{side}_{joint}' for joint in simulation.joint_names)
-                    for side in simulation.arms},
+            joints={**{joint: JointControl('rad', limits[0], limits[1], 'deg', 180 / np.pi)
+                       for joint, limits in zip(names, simulation.joint_limits, strict=True)}, **self.grippers.specs},
+            groups={**{side: tuple(f'{side}_{joint}' for joint in simulation.joint_names)
+                       for side in simulation.arms},
+                    **{side + '_gripper': (joint,) for side, joint in self.grippers.drivers.items()}},
             tcp_targets={side: TcpControl(side) for side in simulation.arms},
         )
 
@@ -71,19 +77,41 @@ class EliteStationAdapter:
     def submit(self, command):
         command = self._capabilities.validate(command)
         if isinstance(command, JointTarget):
-            self.simulation.set_joint_target(command.group, list(command.positions.values()))
+            if command.group.endswith('_gripper'):
+                self.grippers.targets.update(command.positions)
+            else:
+                self.simulation.set_joint_target(command.group, list(command.positions.values()))
         else:
             self.simulation.set_target(command.tcp, command.world_from_tcp)
 
     def step(self):
         """One native simulation step; not part of the generic session protocol."""
+        if self.simulation.collision_error:
+            return self.simulation.step()  # Preserve the native latched error before moving fingers.
+        self.grippers.advance()
         return self.simulation.step()
+
+    def reset(self, q=None, side='both'):
+        sim = self.simulation
+        if q is None:
+            sim.reset_to_home()
+            self.grippers.reset(home=True)
+        else:
+            candidate = sim.q.copy()
+            for i, arm in enumerate(sim.arms):
+                if side in ('both', arm):
+                    candidate[i * 6:(i + 1) * 6] = np.asarray(q)[i * 6:(i + 1) * 6]
+            if sim.collision is not None and not sim.collision.check(self.grippers.full_q(arm_q=candidate)).safe:
+                raise ValueError('Reset rejected with current gripper configuration')
+            sim.reset(q, side)
+            self.grippers.reset()
 
     def snapshot(self):
         sim = self.simulation
         positions = {f'{side}_{joint}': value
                      for side, arm in sim.arms.items()
                      for joint, value in zip(sim.joint_names, arm.q, strict=True)}
+        positions.update(self.grippers.positions)
         return RobotState(max(arm.time for arm in sim.arms.values()), positions,
                           tcp_poses=sim.tcp_poses(), targets=sim.targets())
 
@@ -111,10 +139,12 @@ class _LatestDisplay:
     or input object is passed to the consumer. A stuck sink cannot block Qt;
     close has a finite join and reports a still-running daemon explicitly.
     """
-    def __init__(self, consume, finish, *, hz=30, open_callback=None):
+    def __init__(self, consume, finish, *, hz=30, open_callback=None, follow_callback=None):
         self.consume, self.finish = consume, finish
         self.open_callback = open_callback
         self.open_requested = False
+        self.follow_callback = follow_callback
+        self.follow_requested = False
         self.period = 1 / hz
         self.condition = Condition()
         self.pending = None
@@ -126,13 +156,14 @@ class _LatestDisplay:
         self.thread = Thread(target=self._run, name='elite-rerun', daemon=True)
         self.thread.start()
 
-    def publish(self, state, visible, *, open_viewer=False):
+    def publish(self, state, visible, *, open_viewer=False, follow_live=False):
         with self.condition:
             if self.closed:
                 return False
             self.coalesced += self.pending is not None
             self.pending = (state, visible, perf_counter())
             self.open_requested |= open_viewer
+            self.follow_requested |= follow_live
             self.latest_time = state.time
             self.accepted += 1
             self.condition.notify()
@@ -162,11 +193,14 @@ class _LatestDisplay:
                             continue
                     state, visible, received = self.pending
                     open_viewer, self.open_requested = self.open_requested, False
+                    follow_live, self.follow_requested = self.follow_requested, False
                     self.pending = None
                 try:
                     if open_viewer and self.open_callback is not None:
                         self.open_callback(state, visible)
                     self.consume(state, visible)
+                    if follow_live and self.follow_callback is not None:
+                        self.follow_callback(state, visible)
                     with self.condition:
                         self.rendered += 1
                         self.rendered_time = state.time
@@ -209,11 +243,13 @@ class EliteRerunView:
         self._display = None
         self.collision_visible = False
         self._last_state = None
+        self._last_follow = 0.
         self.update(simulation)
 
     def start_display(self):
         if self._display is None:
-            self._display = _LatestDisplay(self._consume, self._finish, open_callback=self._open)
+            self._display = _LatestDisplay(self._consume, self._finish, open_callback=self._open,
+                                           follow_callback=self._follow_live)
 
     @property
     def stats(self):
@@ -267,6 +303,35 @@ class EliteRerunView:
             return self._display.publish(self._last_state, self.collision_visible, open_viewer=True)
         return self._open(self._last_state, self.collision_visible)
 
+    def follow_live(self):
+        """A deliberate Qt edit requests current display time, off the UI thread."""
+        if getattr(self.renderer.recording, '_rmw_server', None) is None:
+            return False
+        if self._display:
+            return self._display.publish(self._last_state, self.collision_visible, follow_live=True)
+        return self._follow_live(self._last_state, self.collision_visible)
+
+    def _follow_live(self, state, visible):
+        from rerun.experimental import ViewerClient
+        now = perf_counter()
+        if now - self._last_follow < .5:
+            return False  # Coalesce a continuous mouse drag, not every display tick.
+        self._last_follow = now
+        recording = self.renderer.recording
+        try:
+            client = ViewerClient.connect(f'rerun+http://127.0.0.1:{self.port}/proxy')
+            active = client.viewer_state().active_recording
+            if not (active or '').endswith(':' + recording.get_recording_id()):
+                self._open(state, visible)
+                active = client.viewer_state().active_recording
+            if not (active or '').endswith(':' + recording.get_recording_id()):
+                return False
+            recording.flush(timeout_sec=.5)
+            client.set_time(self.renderer.timeline, duration=state.time, play=True, recording=active)
+            return True
+        except ConnectionError:
+            return False  # A closed Viewer never blocks or rejects a robot target.
+
     def _open(self, state, visible):
         def keyframe():
             # GrpcServerSink 0.38.1 can evict static messages too. Refresh the
@@ -316,7 +381,7 @@ class EliteSandboxRuntime:
         return self.advance(steps) if steps else self.samples
 
     def reset_to_home(self):
-        self.adapter.simulation.reset_to_home()
+        self.adapter.reset()
         self._clock, self._backlog, self.samples = None, 0.0, {}
         if self.view:
             self.view.update(self.adapter.simulation)
@@ -344,6 +409,15 @@ def make_generic_qt_window(simulation, view, *, xyz_range=0.3):
     layout.addWidget(QLabel('Collision guard: ' + ('enabled' if simulation.collision else 'disabled')))
     panel = ControlPanel(inputs, xyz_range=xyz_range)
     layout.addWidget(panel)
+    from .elite_gripper import make_gripper_panel
+    gripper_panel = make_gripper_panel(inputs, adapter.grippers,
+        {side: panel.joint_group_boxes[side].layout() for side in simulation.arms},
+        ik_layouts={side: panel.tcp_group_boxes[side].layout() for side in simulation.arms},
+        on_submit=view.follow_live if view else None)
+    for side in simulation.arms:
+        panel.joint_group_boxes[side + '_gripper'].hide()
+    window.gripper_panel = gripper_panel
+    window.ik_gripper_panel = gripper_panel.ik
     status = QLabel('Observed state comes from simulation; submission does not mean sent or achieved.')
     status.setWordWrap(True)
     layout.addWidget(status)
@@ -366,6 +440,7 @@ def make_generic_qt_window(simulation, view, *, xyz_range=0.3):
 
     def display(samples):
         panel.refresh()
+        gripper_panel.refresh()
         status.setText('Simulation observations: ' + json.dumps(samples, default=float))
 
     def advance(steps=4):
@@ -390,6 +465,7 @@ def make_generic_qt_window(simulation, view, *, xyz_range=0.3):
             runtime.reset_to_home()
             panel.sync_targets()
             panel.refresh()
+            gripper_panel.sync()
             status.setText('Offline simulation reset to checked home configuration.')
             timer.start()
         except Exception as exc:
@@ -443,7 +519,7 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
         def reset(self, q, side='both'):
             if not inputs.active:
                 raise ValueError('Qt input ownership is inactive')
-            simulation.reset(q, side)
+            adapter.reset(q, side)
 
         def reset_to_home(self):
             if not inputs.active:
@@ -472,6 +548,19 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
     receipt_label = qt['QLabel']('Input owner: qt · target submission does not mean sent or achieved.')
     receipt_label.setWordWrap(True)
     window.centralWidget().layout().addWidget(receipt_label)
+    from .elite_gripper import make_gripper_panel
+    gripper_panel = make_gripper_panel(inputs, adapter.grippers,
+        {side: getattr(window, side + '_joints').widget.layout() for side in simulation.arms},
+        ik_layouts={side: getattr(window, side + '_pose').widget.layout() for side in simulation.arms},
+        on_submit=view.follow_live if view else None)
+    window.gripper_panel = gripper_panel
+    window.ik_gripper_panel = gripper_panel.ik
+    original_sync = window._sync_from_q
+
+    def sync():
+        original_sync()
+        gripper_panel.sync()
+    window._sync_from_q = sync
     original_fk, original_solve = window._apply_fk, window._solve
 
     def submit(callback, side):
@@ -491,6 +580,7 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
     window._solve = lambda side: submit(original_solve, side)
 
     def display(samples):
+        gripper_panel.refresh()
         # Only observations update these controls; set_q blocks widget signals.
         window._syncing = True
         try:
@@ -572,7 +662,7 @@ def _simulation(args):
     except ImportError as exc:
         raise RuntimeError(
             'Elite requires the current-production-source libpyelite wheel and its dependencies. '
-            'See README.md Install: install the matching evidence/wheels/libpyelite wheel, '
+            'See README.md development/dependencies: install the matching vendor/wheels/libpyelite wheel, '
             'then python -m pip install "robot-motion-workbench[elite]". '
             f'A same-version older wheel is insufficient. Original import error: {exc}'
         ) from exc
@@ -729,6 +819,22 @@ def qt_main(argv=None):
         assert sim.arms[side].joint_target is None
         np.testing.assert_allclose(sim.targets()[side], window.session.last_receipt.command.world_from_tcp, atol=1e-12)
         window.advance()
+        for selected in sim.arms:
+            value = 250 if selected == 'left' else 750
+            window.gripper_panel.sliders[selected].setValue(value)
+            assert window.session.last_receipt.command.group == selected + '_gripper'
+            assert window.ik_gripper_panel.sliders[selected].value() == value
+        window.advance(130)
+        assert view.adapter.grippers.opening('left') == .25
+        assert view.adapter.grippers.opening('right') == .75
+        for selected in sim.arms:
+            value = 40 if selected == 'left' else 60
+            window.ik_gripper_panel.editors[selected].setValue(value)
+            assert window.session.last_receipt.command.group == selected + '_gripper'
+            assert window.gripper_panel.sliders[selected].value() == value * 10
+        window.advance(130)
+        assert view.adapter.grippers.opening('left') == .4
+        assert view.adapter.grippers.opening('right') == .6
         toggle = window.collision_toggle if args.ui == 'generic' else next(
             (button for button in window.findChildren(__import__('PySide6.QtWidgets', fromlist=['QPushButton']).QPushButton)
              if button.text() == '显示碰撞包络'), None)
@@ -746,12 +852,17 @@ def qt_main(argv=None):
         window._reset_home()
         window.render_timer.stop()
         np.testing.assert_allclose(sim.q, sim.home_q)
+        assert all(view.adapter.grippers.opening(selected) == 1 for selected in sim.arms)
+        for gripper_panel in (window.gripper_panel, window.ik_gripper_panel):
+            assert all(slider.value() == 1000 for slider in gripper_panel.sliders.values())
         window.advance()
         app.processEvents()
         window.close()
         print(json.dumps({'qt_smoke': 'passed', 'render_updates': view.renderer.update_count,
                           'simulation_seconds': view.adapter.snapshot().time,
                           'joint_input_checked': True, 'cartesian_input_checked': True,
+                          'gripper_input_checked': True,
+                          'ik_gripper_input_checked': True,
                           'collision_toggle_checked': collision_toggled, 'reset_checked': True}))
         return 0
     window.show()

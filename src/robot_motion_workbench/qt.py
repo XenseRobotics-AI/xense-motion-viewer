@@ -39,7 +39,9 @@ class ControlPanel(QWidget):
         self.session = inputs.controller
         self.xyz_range = float(xyz_range)
         self.joint_editors = {}
+        self.joint_group_boxes = {}
         self.tcp_editors = {}
+        self.tcp_group_boxes = {}
         self.observed_joints = {}
         self.observed_tcps = {}
         self.joint_buttons = {}
@@ -59,6 +61,7 @@ class ControlPanel(QWidget):
             page.setLayout(groups)
             for group, names in capabilities.groups.items():
                 box = QGroupBox(group)
+                self.joint_group_boxes[group] = box
                 form = QFormLayout(box)
                 editors, observed = {}, {}
                 for joint in names:
@@ -87,6 +90,7 @@ class ControlPanel(QWidget):
             page.setLayout(groups)
             for tcp, spec in capabilities.tcp_targets.items():
                 box = QGroupBox(f'{tcp} · {spec.group} · world frame')
+                self.tcp_group_boxes[tcp] = box
                 form, editors = QFormLayout(box), {}
                 for axis in ('x', 'y', 'z', 'roll', 'pitch', 'yaw'):
                     edit = QDoubleSpinBox()

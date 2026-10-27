@@ -27,7 +27,7 @@ def test_production_pinocchio_link_tool_and_collision_parity(station):
     state = adapter.snapshot()
     np.testing.assert_array_equal(sim.q, before)
     assert state.time == 0
-    assert description.dof == len(sim.q)
+    assert description.dof == len(sim.q) + 2  # Independent gripper drivers; mimic fingers follow in the URDF.
     data = sim.model.createData()
     for delta in [0, 0.03]:
         q = sim.viewer_q().copy()
@@ -85,6 +85,8 @@ def test_qt_entry_offscreen(tmp_path, ui):
     result = json.loads(process.stdout.strip().splitlines()[-1])
     assert result['qt_smoke'] == 'passed'
     assert result['simulation_seconds'] > 0
-    assert all(result[key] for key in ['joint_input_checked','cartesian_input_checked','collision_toggle_checked','reset_checked'])
+    assert all(result[key] for key in ['joint_input_checked','cartesian_input_checked','gripper_input_checked',
+                                      'ik_gripper_input_checked',
+                                      'collision_toggle_checked','reset_checked'])
     assert path.stat().st_size > 1000
     subprocess.run([sys.executable, '-m', 'rerun', 'rrd', 'verify', str(path)], check=True, capture_output=True)
