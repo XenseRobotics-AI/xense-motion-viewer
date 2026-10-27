@@ -61,6 +61,43 @@ def test_display_errors_are_observable_and_finish_runs_once():
     assert finished == [True]
 
 
+@pytest.mark.parametrize('hz', [30, 60])
+def test_display_interval_includes_processing_time_and_handles_overruns(monkeypatch, hz):
+    from threading import Condition
+    from types import SimpleNamespace
+    from robot_motion_workbench.adapters import elite
+
+    clock, starts = [0.], []
+    period = 1 / hz
+    costs = [.4, 1.5, .4, .4]
+
+    class ClockCondition(Condition):
+        def wait(self, timeout=None):
+            assert timeout is not None
+            clock[0] += timeout
+
+    monkeypatch.setattr(elite, 'perf_counter', lambda: clock[0])
+    monkeypatch.setattr(elite, 'Condition', ClockCondition)
+    # Drive the real worker loop with a controlled clock, without wall-time
+    # tolerances that can fail merely because the test machine is busy.
+    monkeypatch.setattr(elite, 'Thread', lambda **kwargs: SimpleNamespace(
+        start=lambda: None, join=lambda timeout: None, is_alive=lambda: False))
+
+    def consume(state, visible):
+        starts.append(clock[0])
+        clock[0] += costs[len(starts) - 1] * period
+        if len(starts) < len(costs):
+            worker.publish(RobotState(clock[0], {'q': 0}), False)
+        else:
+            worker.close()
+
+    worker = _LatestDisplay(consume, lambda: None, hz=hz)
+    worker.publish(RobotState(0, {'q': 0}), False)
+    worker._run()
+    np.testing.assert_allclose(starts, np.array([0, 1, 2.5, 3.5]) * period, atol=1e-12)
+    assert worker.stats.errors == 0 and worker.stats.rendered == 4
+
+
 def test_policy_coalesces_pending_feedback_without_discarding_send_or_origin_change():
     from robot_motion_workbench import SampleTime, StreamEvent, VisualizationWorker
     entered, release = Event(), Event()

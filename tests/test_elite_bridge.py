@@ -58,7 +58,7 @@ def test_qt_entry_offscreen(tmp_path):
     path = tmp_path/'qt.rrd'
     env = os.environ | {'QT_QPA_PLATFORM': 'offscreen'}
     process = subprocess.run([sys.executable, '-m', 'robot_motion_workbench.adapters.elite',
-        '--no-viewer', '--no-show', '--save', str(path), '--collision-profile', 'auto'],
+        '--no-viewer', '--no-show', '--display-hz', '60', '--save', str(path), '--collision-profile', 'auto'],
         env=env, text=True, capture_output=True, timeout=120)
     assert process.returncode == 0, process.stderr
     result = json.loads(process.stdout.strip().splitlines()[-1])

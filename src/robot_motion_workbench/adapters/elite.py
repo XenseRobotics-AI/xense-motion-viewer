@@ -133,7 +133,7 @@ class EliteDisplayStats:
 
 
 class _LatestDisplay:
-    """One in-flight frame and one replaceable pending frame, capped at 30 Hz.
+    """One in-flight frame and one pending frame, capped at the requested rate.
 
     Only immutable snapshots/visibility cross this boundary. No SDK, simulation
     or input object is passed to the consumer. A stuck sink cannot block Qt;
@@ -195,6 +195,9 @@ class _LatestDisplay:
                     open_viewer, self.open_requested = self.open_requested, False
                     follow_live, self.follow_requested = self.follow_requested, False
                     self.pending = None
+                # Rendering uses part of this frame's interval. A slow frame
+                # may start the next one immediately, without a catch-up burst.
+                next_frame = perf_counter() + self.period
                 try:
                     if open_viewer and self.open_callback is not None:
                         self.open_callback(state, visible)
@@ -210,7 +213,6 @@ class _LatestDisplay:
                     with self.condition:
                         self.errors += 1
                         self.last_error = f'{type(exc).__name__}: {exc}'
-                next_frame = perf_counter() + self.period
         finally:
             try:
                 self.finish()
@@ -231,13 +233,14 @@ class EliteRerunView:
     """Duck-typed viewer consumed by the existing Elite Qt input window."""
     url = 'Rerun native viewer'
 
-    def __init__(self, simulation, recording, *, instance_id='elite_station', port=9876):
+    def __init__(self, simulation, recording, *, instance_id='elite_station', port=9876, display_hz=30):
         from ..rerun_renderer import RerunRenderer
         self.adapter = EliteStationAdapter(simulation, instance_id=instance_id)
         self.instance_id = instance_id
         self.renderer = RerunRenderer(recording, timeline='sandbox_elapsed', compact=True)
         self.renderer.add_robot(self.adapter.describe())
         self.port = port
+        self.display_hz = display_hz
         self._previous_raw = 0.0
         self._time_offset = 0.0
         self._display = None
@@ -248,7 +251,7 @@ class EliteRerunView:
 
     def start_display(self):
         if self._display is None:
-            self._display = _LatestDisplay(self._consume, self._finish, open_callback=self._open,
+            self._display = _LatestDisplay(self._consume, self._finish, hz=self.display_hz, open_callback=self._open,
                                            follow_callback=self._follow_live)
 
     @property
@@ -514,7 +517,7 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
             if view:
                 stats = view.stats
                 window.mesh_status.setText(
-                    f'Rerun ≤30 Hz · 合并 {stats.coalesced} 帧 · 显示耗时 {stats.last_lag_s*1000:.0f} ms'
+                    f'Rerun ≤{view.display_hz:g} Hz · 合并 {stats.coalesced} 帧 · 显示耗时 {stats.last_lag_s*1000:.0f} ms'
                     + (f' · 错误: {stats.last_error}' if stats.errors else ''))
         except Exception as exc:
             window.render_timer.stop()
@@ -542,6 +545,8 @@ def _parser(qt=False):
     parser.add_argument('--instance-id', default='elite_station')
     parser.add_argument('--save', type=Path, required=not qt)
     if qt:
+        parser.add_argument('--display-hz', type=int, choices=(30, 60), default=30,
+                            help='Maximum display update frequency (default: 30 Hz)')
         parser.add_argument('--no-viewer', action='store_true')
         parser.add_argument('--no-show', action='store_true', help='Exercise public command/Qt callbacks and exit')
         parser.add_argument('--port', type=int, default=9876)
@@ -685,7 +690,7 @@ def qt_main(argv=None):
         parser.error('--xyz-range must be finite and positive')
     sim = _simulation(args)
     recording = _recording(args.save, viewer_port=None if args.no_viewer else args.port)
-    view = EliteRerunView(sim, recording, instance_id=args.instance_id, port=args.port)
+    view = EliteRerunView(sim, recording, instance_id=args.instance_id, port=args.port, display_hz=args.display_hz)
     app, window = make_qt_window(sim, view, xyz_range=args.xyz_range)
     if args.no_show:
         window.render_timer.stop()
