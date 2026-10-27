@@ -1,193 +1,87 @@
-# Policy telemetry and lifecycle
+# Policy 参考、轨迹与遥测
 
-`PolicyInput` uses an already-acquired Phase 2 `InputSession`. Accepting chunks,
-selecting steps, displaying, and replaying are read-only operations with respect
-to the robot. Only `execute_selected(now=...)` calls that session's `submit`.
-Offsets describe intent and do not schedule a control loop. The Elite example's
-host loop calls unchanged native simulation; the portable/external-URDF example
-explicitly advances a synthetic numerical follower with no dynamics or IK.
+`rmw-elite-policy` 将采集动作或手写目标作为参考，驱动原生 Elite 双臂仿真。
+它不运行模型推理；显示和回放都不取得机器人输入权。
 
-`SampleTime.received_at` is the host elapsed receipt/availability clock. Optional
-`source_time` and `source_clock` must appear together; clocks are never silently
-subtracted. The Elite demo explicitly uses native simulation elapsed time as its
-offline host clock, while retaining the named `elite_simulation` source clock.
-External hosts must establish their own clock synchronization. Recording epochs
-must be monotonic; use a new recording for a new epoch.
+## 参考与执行
 
-## Separate observations
+`PolicyChunk` 保存完整参考序列、时间偏移、关节组、来源时间和过期时间，支持：
 
-Prediction, selection, submitted request, planned, sent and feedback have distinct
-paths and immutable values. `PolicySubmission.ref` includes chunk ID and selected
-step index. This association comes from the SDK/host; it cannot be deduced from
-timestamps or nearest predictions. Feedback with unknown association uses
-`ref=None`. Lifecycle events with no selected step use `StepRef(chunk_id, None)`.
+- `absolute_joint_positions`：命名关节的绝对位置。
+- `absolute_tcp_poses`：世界坐标中的绝对 TCP 位姿。
 
-The host constructs events from copies on the SDK's owner thread:
+`PolicyInput.accept()` 校验整个 chunk，`select()` 选择步骤；
+只有 `execute_selected()` 通过已有 `InputSession.submit()` 提交目标。
+时间偏移描述执行意图，实际调度由宿主循环负责。
 
-```python
-from robot_motion_workbench import SampleTime, StreamEvent
+替换或过期会清除当前选择与可视参考，不会取消 SDK 已接受的目标。
+chunk ID 在同一 `PolicyInput` 生命周期内唯一，所有输入数组和事件均为不可变副本。
+`StepRef` 标识 chunk 与步骤；重复执行同一步时，具体提交尝试由独立的回执序号区分。
 
-snapshot = session.snapshot()
-display_worker.publish(StreamEvent(
-    'feedback', SampleTime(host_receipt),  # Source sample time unavailable.
-    'simulated', submitted.ref, state=snapshot,
-))
-# An SDK-owned planner callback may provide its actual named planned target:
-display_worker.publish(StreamEvent(
-    'planned', SampleTime(host_receipt), 'reference', submitted.ref,
-    command=actual_planned_target,
-))
-# Only a successful send callback with evidence of the actual sample may emit:
-display_worker.publish(StreamEvent(
-    'sent', SampleTime(send_receipt, source_time=send_source_time,
-                       source_clock='sdk_send_clock'),
-    'measured', submitted.ref, command=actual_sent_target,
-))
+## 内置轨迹与导入
+
+默认数据来自包内 `assets/elite_episode_000.npz`：episode 0，4451 帧，30 Hz，
+约 148.37 秒。读取 `action` 列中的世界 XYZ、6D 姿态和左右夹爪开度。
+XYZ 单位为米，6D 姿态表示旋转矩阵的前两列，加载时正交化；不缩放、平移或循环播放。
+原始动作、时间戳、帧号和来源文件 SHA-256 保存在 NPZ 中，运行不依赖原始挂载或视频。
+
+默认 `--arm both`：左右臂选择同一源数据帧，先提交两臂 TCP 与夹爪目标，
+再统一推进一次原生站点仿真，保留双臂碰撞协调。
+`--arm left` / `--arm right` 只播放单臂，另一臂保持启动姿态。
+
+每个参考 chunk 最多 60 帧，选择依据原始时间戳。`--duration N` 限制播放时长；
+`--source synthetic` 使用手写 TCP 参考；`--kind joint` 使用手写关节参考，
+因为采集数据不包含关节角。
+
+导入另一条 Elite LeRobot v3 episode：
+
+```sh
+python scripts/import_elite_episode.py /path/to/dataset \
+  --episode 1 --output recordings/episode-1.npz
+rmw-elite-policy --trajectory recordings/episode-1.npz
 ```
 
-Only provide `SampleTime(host_receipt, source_time=actual_source_time,
-source_clock='sdk_elapsed')` when that source sample time is exposed by the SDK.
-In particular, the injected Flexiv joint bridge exposes no such timestamp:
-`snapshot.time` is elapsed host poll completion, so it must not be reused as
-a source timestamp. A recent poll alone does not establish sample freshness.
-The serialized feedback `state_time` is the adapter's rendering clock; only
-`timing.source_time` / `timing.source_clock` declare source-sample timing.
-Older 0.3 recordings called this neutral state field `source_state_time`;
-0.4 removes that misleading label without altering rendering or stream clocks.
+导入需要 PyArrow，随 `rerun` 可选依赖安装。输入数据集须为 `v3.0` 格式，
+`robot_type` 为 `bi_elite_cs66_rt`，包含所选机械臂的 TCP 和夹爪动作列。
 
-This is an integration recipe, not an implemented hardware transport. Use
-`origin='simulated'` for simulation send/feedback samples, `measured` for actual
-observed samples, and `reference` for policy/planned/request data. Policy chunks
-are always references. Future references cannot become measured `RobotState`
-samples. Available `sent` and `feedback` events reject `reference` provenance.
+夹爪开度范围为 0..1（闭合到张开），经站点配置转换为 URDF 手指关节，
+按关节速度限制运动，并由原生碰撞检查验证每段位移；不安全时保持当前位置。
+这只模拟开合运动，不包含电机动力学或物体接触力。
 
-A setter's success creates only the session receipt and an unavailable sent
-fallback with `fallback=True` and that receipt's `submission_sequence`. This is
-submission bookkeeping, not an authoritative report that a transport sent
-nothing. It never fabricates a sent/planned/feedback value. Without telemetry:
+## 显示与数据语义
 
-```python
-display_worker.publish(StreamEvent(
-    'planned', SampleTime(host_receipt), 'reference', submitted.ref,
-    reason='Adapter has no planner telemetry',
-))
-```
+一个共享 3D 视图显示机器人、两臂参考和反馈：
 
-Unavailable streams have no command/state value and require an explanation.
-The renderer labels absent/unavailable streams, host receipt times, known or
-unknown source time, origin, association and freshness independently. RRD data
-retains every supplied joint/pose value even when the compact status panel shows
-only a representative value. Blue TCP paths show the remaining selected chunk;
-green lines and robot geometry are received feedback. The orange target marker
-has no text label, and the complete chunk remains in the recording metadata.
-A TCP close-up shows short paths.
+- 蓝线：当前 chunk 从选中步骤起的剩余 TCP 参考；完整 chunk 仍保存在元数据中。
+- 橙点：选中的目标 TCP。
+- 绿线及端点：原生仿真的 TCP 历史和最新反馈。
 
-Unavailable feedback updates the availability/reason table but does not relabel
-retained geometry. The renderer separately records `rendered_feedback` with the
-origin, host/source times and age of the last available state. A transition
-between available simulated and measured states clears TCP history before the
-new point, so a displayed line never joins points of different origins.
+TCP 是配置工具坐标系的世界位置，不是某根手指的尖端；夹爪开合不改变 TCP 定义。
+`--telemetry` 增加文本状态栏。
 
-Raw events (including fallbacks) remain under `events/`. Authoritative callback
-samples and absence reports update `streams/sent`; automatic fallbacks update
-`bookkeeping/sent` separately. Without any callback, the sent row shows unavailable
-with the fallback reason. Once callbacks exist, it shows the latest callback,
-including authoritative absence reports and reasons; a fallback cannot hide it.
-The panel separately identifies the no-evidence submission return by receipt
-sequence, chunk/step and host time. A newer return does not relabel an older
-callback as evidence for the new submission.
+prediction、selection、submitted、planned、sent、feedback 分别存储。
+采集动作标为 `reference`，原生规划值和反馈标为 `simulated`；
+采集的 `observation.state` 不会被当成当前仿真反馈。
+无实际发送回调时，`sent` 为 `unavailable`，提交成功不代表已发送或已到达。
 
-`StepRef` identifies a policy chunk and step, not an individual repeat execution.
-No callback-to-submission attempt is inferred from event order or timestamps.
-If the SDK can establish the exact session receipt, it may supply the optional
-`submission_sequence` on its telemetry event; this is recorded and displayed as
-provided. A synchronous callback before submit returns will normally know only
-the chunk/step, and stays that way. Without per-attempt correlation, its value
-remains independent of fallback bookkeeping even when the same step is submitted
-again. Real adapter absence reports use the default `fallback=False`.
+`SampleTime.received_at` 是宿主收到数据的时间；`source_time` 与 `source_clock`
+仅在存在源采样时间时成对提供。Elite 离线循环使用仿真经过时间作为宿主时钟，
+并保留数据集或 `elite_simulation` 源时钟。不同时间基准不会被隐式相减。
+反馈的 `state_time` 是显示时钟，不自动等于源采样时间。
 
-## Lifetime and queues
+原始事件按时间行写入固定的 `events/log` 实体，`event_sequence` 保留消费顺序，
+避免长回放为每条事件创建新实体。发送回调位于 `streams/sent`，自动生成的无发送证据记录
+位于 `bookkeeping/sent`。后者不会覆盖已有发送回调，也不会替新一次提交证明发送成功。
+反馈缺失时保留已有几何及其原始来源；来源在模拟和实测间变化时清空历史连线。
 
-Accept validates every step before changing active chunk, selection or lifecycle
-time. Chunk IDs are unique for one `PolicyInput` lifetime. Its small ID registry
-is cleared on close; keep policy lifetimes bounded for indefinite services.
-Input arrays and mappings are immutable copies, including preview references.
-Supersession/expiry clears active selection and visual references. It does not
-cancel a target in the robot SDK. Close releases this lease only and cannot
-release a replacement lease. Existing Phase 2 ownership remains authoritative.
+## 队列与回放
 
-Only the bounded `VisualizationWorker` owns display consumption. Queue drops may
-omit entire events; display is not a complete control audit. `stats` includes
-accepted, consumed (including errored callbacks), pending, dropped_full,
-discarded_close, rejected_closed, errors, last_error, closed and alive. A callback
-runs outside the bookkeeping lock, so slow rendering cannot hold up publication
-or target submission. Consumer errors are counted and the worker continues.
+有界 `VisualizationWorker` 只消费显示数据，不能访问适配器或输入权。
+Elite 启用反馈合并，仅替换同阶段、同组、同来源的待显示样本；
+保留最早待显示反馈与最新反馈，避免持续更新把机器人姿态一直推到队尾。
+控制生命周期、发送证据、缺失报告和不同来源的事件保持独立。
+应检查丢帧、合并、错误计数和 `close()` 返回值；显示录制不作为完整控制审计。
 
-The Elite mock CLI additionally enables `coalesce_feedback=True`: newer
-available feedback/planned display samples replace older pending samples of
-the same origin, then are appended in host-time order. Control lifecycle, sent
-evidence, absence and different-origin samples remain distinct. `stats.coalesced`
-counts these replaced samples. The generic worker's default remains FIFO.
-Elite displays robot, remaining reference, selected target and received TCP
-trail in one shared 3D view; `--telemetry` adds only a text panel. By default,
-the example consumes both arms from the bundled Elite dataset episode 0's `action`
-column: 4451 synchronized pairs at 30 Hz, about 148.37 seconds, played once. Each 60-sample
-chunk retains its original source time; selection uses the original timestamp
-of each row, independently of display cadence. The 6D rotation contains the
-first two **columns** of the world rotation matrix and is orthonormalized at
-load time. XYZ values remain in metres without scaling or recentering.
-
-`--arm both` is the default. Both policies share one input lease and SDK owner
-thread. They select the same source frame and submit both targets before one
-`StationSimulation.step()`, retaining the native dual-arm collision coordinator.
-`--arm left` / `--arm right` selects a single arm; the other stays at startup.
-The renderer keeps independent group chunks, selected points, receipts and
-planned/sent telemetry under `.../groups/left` and `.../groups/right`, with one
-robot model, one shared 3D view and one full-station feedback update. Stream
-events carry an optional `group`; display coalescing only replaces samples of
-the same stage **and group**, so a right-arm value cannot evict a left-arm value.
-The dataset action is a `reference`, not a policy inference or newly measured
-feedback. The robot/green trail and planned values still come from the native
-simulation. Dataset observations are not substituted for simulation feedback;
-Gripper actions (`<arm>_gripper.pos`, 0 closed to 1 open) are submitted through
-the same input lease and at the same source time as the arm's TCP target, before
-the station step. Each submission row retains its opening and separate gripper
-receipt sequence. Recorded playback requires the selected arms' gripper columns.
-The adapter maps opening through the station's calibration to independent
-finger joints (`left_gripper` / `right_gripper` control groups); URDF mimic joints
-follow them. A rate-limited offline model uses URDF joint velocity limits, and
-the native collision checker certifies each finger segment before it advances.
-An unsafe segment holds the fingers. The native arm collision coordinator and
-renderer receive the same expanded finger configuration. This models opening
-motion, not gripper motor dynamics or object contact forces.
-
-The blue TCP geometry is trimmed from the selected index onward; the original
-full chunk is still recorded as reference metadata. Orange marks the selected
-**target** TCP, while the green endpoint marks the current **simulated** TCP.
-These points are world XYZ of the configured tool frame, independent of jaw
-opening, not one physical fingertip. Selected-point text labels are hidden.
-Source metadata,
-file hashes and the selected arm are recorded under `policy/.../reference_source`
-and in the CLI result JSON. No remote mount, camera videos or LeRobot runtime
-are needed. `scripts/import_elite_episode.py` can export another episode for
-`--trajectory path.npz`.
-
-`--duration N` limits playback seconds. `--source synthetic` retains the old
-12-second example; `--kind joint` selects that source implicitly because the
-dataset has no joint angles. `--no-viewer --fast --steps N` is the explicit
-finite verification path. Both sources keep native planning/collision limits.
-The host must inspect counters and the Boolean close result. A custom sink can
-violate the nonblocking contract; do not pass synchronous rendering as the
-publisher. Publisher exceptions are contained so an SDK-accepted command still
-returns its submitted receipt; inspect `display_errors` / `display_drops`.
-
-Close producers on the SDK owner thread, then drain the display worker with a
-finite timeout. The example flushes/disconnects Rerun in `close_callback`, on the
-display thread. That callback runs once after drain/discard. No background thread
-gets an adapter, SDK model, native planner, input lease or actuator callback.
-
-`replay_events(events, renderer.consume)` only iterates immutable data into a
-display sink. `rmw-policy-replay recording.rrd` launches the Rerun Viewer without
-constructing a simulation/controller. Neither mode executes recorded requests.
-This package supplies no universal scheduler, IK, inference, stop/cancel API,
-transport, safety validation or real-time guarantee.
+关闭时先释放输入，再限时排空显示队列、刷新并断开 Rerun。
+`rmw-policy-replay recording.rrd` 只启动 Viewer，`replay_events()` 只消费不可变事件，
+两者都不会执行录制中的目标。
