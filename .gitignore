@@ -4,8 +4,7 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
-evidence/*.rrd
-evidence/wheels/
+/vendor/wheels/*.whl
 
 # Local verification environments, large recordings and generated demo outputs
 /evidence/

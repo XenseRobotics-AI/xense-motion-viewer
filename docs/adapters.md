@@ -146,10 +146,27 @@ order, and calls the existing `StationSimulation.set_joint_target` or
 `StationSimulation.step`, including the production planner, sender gate,
 collision guard, latching, recipe TCP and dynamic target-jump rules.
 
+The Elite adapter additionally exposes two independent finger joints and
+`left_gripper` / `right_gripper` groups. `adapter.grippers.target(side, opening)`
+converts normalized opening (0 closed, 1 open) through the station calibration
+to an ordinary SI `JointTarget`, submitted through the same session. Before
+each native arm step, the offline finger model advances within URDF velocity
+limits and checks the full finger segment with the native collision checker.
+Unsafe motion holds. Mimic expansion, native guard configuration and rendered
+snapshots agree on the finger positions. This is a kinematic opening simulation,
+not motor dynamics or grasp/contact simulation; it opens no gripper connection.
+
 `rmw-elite-qt` preserves the useful original Elite slider/FK/IK workflow via a
 thin facade and readable original classification diagnostics. This vendor UI
 is specifically for Elite; the generic panel makes no six-axis assumptions.
 Both UIs and `rmw-elite-record --jog-m ...` submit through `RobotSession`.
+Both Elite Qt layouts place each gripper slider below its arm's six joint
+controls and below yaw in the IK page. Both copies share target values and
+separate observed opening labels; synchronizing copies never submits a command. A deliberate gripper
+edit also requests the current simulation time and playback in the live Viewer
+on the display worker, preserving its camera and panels; idle observation does
+not seek the Viewer. Observation refresh blocks submission; ownership takeover
+disables these controls, and stale signals are rejected by the same session.
 `rmw-elite-qt --ui generic` selects the metadata panel. Explicit home/reset
 controls remain offline simulation lifecycle operations, require Qt ownership,
 and are not portable robot-motion commands. Rendering preserves its monotonic
@@ -165,7 +182,10 @@ and display errors. The Elite CLI configures file + gRPC sinks together before
 logging, with a 33 ms batch tick; it does not replace a file sink by spawning.
 
 The optional `elite` extra alone cannot guarantee the current planner: use the
-current-source wheel recorded in the Phase 1 evidence, rather than trusting
-its version number. Missing Elite imports produce installation guidance with
+matching wheel in `vendor/wheels/`, with its source revision and hashes recorded
+in [the SDK provenance](../vendor/libpyelite-provenance.json), rather than trusting
+its version number. The SDK (including native code and URDF/mesh assets) is
+installed in the Python environment, not loaded from a repository submodule.
+Missing Elite imports produce installation guidance with
 the original exception as their cause. No hardware integration is validated
 by these offline examples or tests.

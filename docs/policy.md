@@ -77,9 +77,10 @@ Unavailable streams have no command/state value and require an explanation.
 The renderer labels absent/unavailable streams, host receipt times, known or
 unknown source time, origin, association and freshness independently. RRD data
 retains every supplied joint/pose value even when the compact status panel shows
-only a representative value. Blue points/axes are full future references; green
-lines and robot geometry are received feedback. Endpoint and selected labels
-reduce clutter without reducing chunk data. A TCP close-up shows short paths.
+only a representative value. Blue TCP paths show the remaining selected chunk;
+green lines and robot geometry are received feedback. The orange target marker
+has no text label, and the complete chunk remains in the recording metadata.
+A TCP close-up shows short paths.
 
 Unavailable feedback updates the availability/reason table but does not relabel
 retained geometry. The renderer separately records `rendered_feedback` with the
@@ -127,10 +128,54 @@ available feedback/planned display samples replace older pending samples of
 the same origin, then are appended in host-time order. Control lifecycle, sent
 evidence, absence and different-origin samples remain distinct. `stats.coalesced`
 counts these replaced samples. The generic worker's default remains FIFO.
-Elite displays robot, full future reference, selected point and received TCP
-trail in one shared 3D view; `--telemetry` adds only a text panel. Its default
-mock execution is wall-clock paced, with bounded references around startup;
-`--no-viewer --fast --steps N` is the explicit finite verification path.
+Elite displays robot, remaining reference, selected target and received TCP
+trail in one shared 3D view; `--telemetry` adds only a text panel. By default,
+the example consumes both arms from the bundled Elite dataset episode 0's `action`
+column: 4451 synchronized pairs at 30 Hz, about 148.37 seconds, played once. Each 60-sample
+chunk retains its original source time; selection uses the original timestamp
+of each row, independently of display cadence. The 6D rotation contains the
+first two **columns** of the world rotation matrix and is orthonormalized at
+load time. XYZ values remain in metres without scaling or recentering.
+
+`--arm both` is the default. Both policies share one input lease and SDK owner
+thread. They select the same source frame and submit both targets before one
+`StationSimulation.step()`, retaining the native dual-arm collision coordinator.
+`--arm left` / `--arm right` selects a single arm; the other stays at startup.
+The renderer keeps independent group chunks, selected points, receipts and
+planned/sent telemetry under `.../groups/left` and `.../groups/right`, with one
+robot model, one shared 3D view and one full-station feedback update. Stream
+events carry an optional `group`; display coalescing only replaces samples of
+the same stage **and group**, so a right-arm value cannot evict a left-arm value.
+The dataset action is a `reference`, not a policy inference or newly measured
+feedback. The robot/green trail and planned values still come from the native
+simulation. Dataset observations are not substituted for simulation feedback;
+Gripper actions (`<arm>_gripper.pos`, 0 closed to 1 open) are submitted through
+the same input lease and at the same source time as the arm's TCP target, before
+the station step. Each submission row retains its opening and separate gripper
+receipt sequence. Recorded playback requires the selected arms' gripper columns.
+The adapter maps opening through the station's calibration to independent
+finger joints (`left_gripper` / `right_gripper` control groups); URDF mimic joints
+follow them. A rate-limited offline model uses URDF joint velocity limits, and
+the native collision checker certifies each finger segment before it advances.
+An unsafe segment holds the fingers. The native arm collision coordinator and
+renderer receive the same expanded finger configuration. This models opening
+motion, not gripper motor dynamics or object contact forces.
+
+The blue TCP geometry is trimmed from the selected index onward; the original
+full chunk is still recorded as reference metadata. Orange marks the selected
+**target** TCP, while the green endpoint marks the current **simulated** TCP.
+These points are world XYZ of the configured tool frame, independent of jaw
+opening, not one physical fingertip. Selected-point text labels are hidden.
+Source metadata,
+file hashes and the selected arm are recorded under `policy/.../reference_source`
+and in the CLI result JSON. No remote mount, camera videos or LeRobot runtime
+are needed. `scripts/import_elite_episode.py` can export another episode for
+`--trajectory path.npz`.
+
+`--duration N` limits playback seconds. `--source synthetic` retains the old
+12-second example; `--kind joint` selects that source implicitly because the
+dataset has no joint angles. `--no-viewer --fast --steps N` is the explicit
+finite verification path. Both sources keep native planning/collision limits.
 The host must inspect counters and the Boolean close result. A custom sink can
 violate the nonblocking contract; do not pass synchronous rendering as the
 publisher. Publisher exceptions are contained so an SDK-accepted command still

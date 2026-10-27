@@ -1,0 +1,33 @@
+{
+  "package": "libpyelite",
+  "version": "0.1.0",
+  "wheel": "vendor/wheels/libpyelite-0.1.0-cp312-cp312-linux_x86_64.whl",
+  "wheel_sha256": "dea977961be77d128cf47f8b077ccb6cd1cec88bada0e00a69f55eb8275b34d6",
+  "python_tag": "cp312",
+  "platform_tag": "linux_x86_64",
+  "recorded_source": {
+    "workspace": "/home/olorin/orca/workspaces/lerobot-xense/fix-singularity-ik/third_party/libpyelite",
+    "git_revision": "c080652c347ef7773b2a3fec25d4f5b19cdf7c53",
+    "git_status": ""
+  },
+  "native_module_sha256": "9e157e05f318bfbfcaaf37938d733abcb7514c5ef82c7c5661f0f461c660b2c5",
+  "python_module_sha256": {
+    "__init__.py": "f5a9ccb28cd36bf9b54c40c212ee1ab43f60134337a4e2635c88866500236a02",
+    "sim.py": "18bd9c28e9e0ccd42aad4970b9beecc0096f5593adf9f6d63eaa9a344330ab7c",
+    "collision.py": "8ae7c942b6d51f7fa692e136e240ba788d122172ea1cea8d53f50813f9708124",
+    "assembly.py": "976b355a4d0abb714a5e69151de5e3bf030fa90c99874b6ce5e8f73dba120e27",
+    "control_profile.py": "a8dc384310280ae5aa208fbcaabe1bcbde10dc633cc6f6d5717322af923cb215"
+  },
+  "build": {
+    "python_version": "3.12.14 (main, Sep  2 2026, 23:27:36) [GCC 15.3.0]",
+    "requirements": [
+      "pin==4.1.0",
+      "scikit-build-core",
+      "pybind11",
+      "cmeel-eigen",
+      "cmeel-urdfdom-headers"
+    ],
+    "command": "python -m pip wheel --no-build-isolation --no-deps /path/to/libpyelite --wheel-dir vendor/wheels",
+    "note": "Built from a copy of the recorded source workspace. Obtain the source and its submodules separately; this repository uses the installed wheel."
+  }
+}
