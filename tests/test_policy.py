@@ -227,6 +227,32 @@ def test_consumer_error_and_close_discard_are_observable():
     assert worker.stats.pending == 0 and 'bad display' in worker.stats.last_error
 
 
+def test_display_batches_preserve_order_and_reject_whole_frames_when_full():
+    entered, release = Event(), Event()
+    batches = []
+
+    def consume(events):
+        if not batches:
+            entered.set()
+            assert release.wait(3)
+        batches.append(events)
+
+    worker = VisualizationWorker(consume, capacity=4, batch=True)
+    try:
+        assert worker.publish_many([0, 1])
+        assert entered.wait(2)
+        assert worker.publish_many([2, 3, 4])
+        assert not worker.publish_many([5, 6])
+        assert worker.stats.pending == 3 and worker.stats.dropped_full == 2
+        assert worker.publish_many([7])
+    finally:
+        release.set()
+        assert worker.close(timeout=3)
+    assert batches == [(0, 1), (2, 3, 4, 7)]
+    assert worker.stats.consumed == worker.stats.accepted == 6
+    assert worker.stats.errors == worker.stats.coalesced == 0
+
+
 def test_continuous_telemetry_cannot_starve_pending_feedback():
     entered, release, done = Event(), Event(), Event()
     consumed = []

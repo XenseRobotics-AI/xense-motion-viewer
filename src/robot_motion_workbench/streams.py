@@ -28,8 +28,10 @@ class VisualizationWorker:
     running. Python cannot kill a hung callback. Re-close after it returns.
     Consumer exceptions are counted and consumption continues. close_callback
     runs once on the display thread (e.g. renderer flush/disconnect).
+    With batch=True the consumer receives all pending events as one tuple;
+    capacity and statistics still count individual events, not tuples.
     """
-    def __init__(self, consume, *, capacity=64, close_callback=None, coalesce_feedback=False):
+    def __init__(self, consume, *, capacity=64, close_callback=None, coalesce_feedback=False, batch=False):
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 1:
             raise ValueError('capacity must be a positive integer')
         self._consume, self._finish = consume, close_callback
@@ -41,6 +43,7 @@ class VisualizationWorker:
         self._last_error = None
         self._discarded = 0
         self._coalesce_feedback = coalesce_feedback
+        self._batch = batch
         self._coalesced = 0
         self._thread = Thread(target=self._run, name='rmw-visualization', daemon=True)
         self._thread.start()
@@ -80,6 +83,25 @@ class VisualizationWorker:
             self._condition.notify()
             return True
 
+    def publish_many(self, events):
+        """Enqueue one display frame atomically; capacity/stats count events.
+
+        Reject the whole frame when full, so a pose cannot be separated from
+        its associated reference changes. This path preserves every event.
+        """
+        events = tuple(events)
+        with self._condition:
+            if self._closed:
+                self._rejected += len(events)
+                return False
+            if len(self._queue) + len(events) > self._capacity:
+                self._dropped += len(events)
+                return False
+            self._queue.extend(events)
+            self._accepted += len(events)
+            self._condition.notify()
+            return True
+
     @property
     def stats(self):
         with self._condition:
@@ -99,14 +121,20 @@ class VisualizationWorker:
                     self._condition.wait_for(lambda: self._queue or self._closed)
                     if not self._queue:
                         break
-                    event = self._queue.popleft()
+                    if self._batch:
+                        event = tuple(self._queue)
+                        self._queue.clear()
+                        count = len(event)
+                    else:
+                        event = self._queue.popleft()
+                        count = 1
                 try:
                     self._consume(event)
                 except Exception as exc:
                     self._error(exc)
                 finally:
                     with self._condition:
-                        self._consumed += 1
+                        self._consumed += count
         finally:
             if self._finish:
                 try:
