@@ -25,7 +25,7 @@ rmw-demo-qt = "robot_motion_workbench.examples.reference:qt_main"
 rmw-callback-demo = "robot_motion_workbench.examples.callback_sdk:main"
 
 [tool.setuptools.package-data]
-robot_motion_workbench = ["assets/*.urdf", "assets/*.txt"]
+robot_motion_workbench = ["assets/*.urdf", "assets/*.txt", "assets/*.npz"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
