@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xense-motion-viewer"
-version = "0.4.1"
-description = "Elite CS66 offline motion workbench with Qt control, policy references and Rerun visualization"
+version = "0.5.0"
+description = "Robot motion workbench with read-only live policy/state visualization and offline Elite tools"
 requires-python = ">=3.12"
 dependencies = ["numpy>=2,<3"]
 

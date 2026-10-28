@@ -6,6 +6,7 @@ import numpy as np
 
 from ..contracts import frozen_array
 from ..policy import PolicyChunk, SampleTime
+from ..poses import poses_from_xyz_rotation6d
 
 
 DEFAULT_TRAJECTORY = Path(__file__).resolve().parents[1] / 'assets' / 'elite_episode_000.npz'
@@ -30,20 +31,7 @@ def tcp_poses_from_actions(actions, feature_names, arm):
         tcp = values[:, [names.index(key) for key in keys]]
     except ValueError as exc:
         raise ValueError(f'Missing {arm} TCP action features') from exc
-    first = tcp[:, 3:6]
-    norm = np.linalg.norm(first, axis=1, keepdims=True)
-    if np.any(norm < 1e-8):
-        raise ValueError('Degenerate first rotation-6D column')
-    first = first / norm
-    second = tcp[:, 6:9] - np.sum(first * tcp[:, 6:9], axis=1, keepdims=True) * first
-    norm = np.linalg.norm(second, axis=1, keepdims=True)
-    if np.any(norm < 1e-8):
-        raise ValueError('Degenerate second rotation-6D column')
-    second = second / norm
-    poses = np.tile(np.eye(4), (len(values), 1, 1))
-    poses[:, :3, :3] = np.stack((first, second, np.cross(first, second)), axis=-1)
-    poses[:, :3, 3] = tcp[:, :3]
-    return poses
+    return poses_from_xyz_rotation6d(tcp)
 
 
 class RecordedTrajectory:

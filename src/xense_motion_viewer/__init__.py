@@ -8,10 +8,11 @@ from .control import (
 from .policy import (JointPreview, PolicyChunk, PolicyInput, PolicySubmission,
                      SampleTime, StepRef, StreamEvent, replay_events)
 from .streams import DisplayStats, VisualizationWorker
+from .poses import poses_from_xyz_rotation6d
 
 __all__ = ["AttachedMesh", "RobotAdapter", "RobotDescription", "RobotState", "ToolFrame",
            "CallbackRobotAdapter", "Command", "ControllableRobotAdapter", "ControlCapabilities",
            "InputOwnershipError", "InputSession", "JointControl", "JointTarget", "RobotSession",
            "SubmissionReceipt", "TcpControl", "TcpTarget", "JointPreview", "PolicyChunk",
            "PolicyInput", "PolicySubmission", "SampleTime", "StepRef", "StreamEvent", "replay_events",
-           "DisplayStats", "VisualizationWorker"]
+           "DisplayStats", "VisualizationWorker", "poses_from_xyz_rotation6d"]
