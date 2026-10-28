@@ -1,13 +1,16 @@
 # Xense Motion Viewer
 
-Elite CS66 双臂离线运动工作台，使用原生 `libpyelite` 仿真、Qt 输入面板和 Rerun 可视化。
+机器人运动工作台，支持真实 policy/SDK 状态的只读显示，以及 Elite CS66 离线仿真和 Qt 控制。
 
-当前维护两条使用路径：
+当前维护以下使用路径：
 
 - **Elite + Qt**：交互设置双臂关节、TCP 位姿与夹爪开度，查看仿真运动和碰撞包络。
 - **Elite + Policy**：播放采集动作或手写参考，在同一 3D 视图中对比目标与仿真反馈。
+- **真实 Policy + SDK 状态**：接收未来 TCP 参考与真实关节/TCP 状态，显示机器人、已走轨迹与当前点。
+  通过公共只读接口接入，详见 [在线显示接口](docs/live.md)。
 
-支持 `diagonal-07`、`diagonal-08` 两种站点，以及 RRD 录制、回放和 Viewer 重连。运动规划、IK 与碰撞检查由 SDK 负责；当前不连接真机，不运行 VLA 推理。
+Elite 离线工具支持 `diagonal-07`、`diagonal-08` 两种站点，以及 RRD 录制、回放和 Viewer 重连。
+在线显示由宿主提供真机数据；机器人控制、SDK 连接和 VLA 推理均由宿主管理。
 
 ## 安装
 
