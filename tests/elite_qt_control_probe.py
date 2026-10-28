@@ -12,8 +12,8 @@ from PySide6.QtCore import Qt, QPoint
 from PySide6.QtWidgets import QStyle, QStyleOptionSlider
 from PySide6.QtTest import QTest
 
-from robot_motion_workbench import JointTarget, TcpTarget
-from robot_motion_workbench.adapters.elite import EliteRerunView, make_qt_window
+from xense_motion_viewer import JointTarget, TcpTarget
+from xense_motion_viewer.adapters.elite import EliteRerunView, make_qt_window
 
 
 def main(directory):

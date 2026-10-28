@@ -6,8 +6,8 @@ import pytest
 import rerun as rr
 from rerun.chunk import RrdReader
 
-from robot_motion_workbench import RobotDescription, RobotState, ToolFrame
-from robot_motion_workbench.rerun_renderer import RerunRenderer, segment
+from xense_motion_viewer import RobotDescription, RobotState, ToolFrame
+from xense_motion_viewer.rerun_renderer import RerunRenderer, segment
 
 
 def column_rows(chunks, path, component):
@@ -25,7 +25,7 @@ def column_rows(chunks, path, component):
 def test_real_sdk_namespaces_transforms_and_static_geometry(tmp_path, robot_urdf, names):
     rr.set_strict_mode(True)
     path = tmp_path/'generic.rrd'
-    rec = rr.RecordingStream('rmw-test')
+    rec = rr.RecordingStream('xmv-test')
     rec.save(path)
     renderer = RerunRenderer(rec)
     base = np.eye(4); base[0, 3] = 5

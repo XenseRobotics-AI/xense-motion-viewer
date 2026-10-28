@@ -21,9 +21,9 @@ class EliteStationAdapter:
     def __init__(self, simulation, *, instance_id='elite_station'):
         self.simulation = simulation
         from .elite_gripper import EliteGrippers
-        if not hasattr(simulation, '_rmw_grippers'):
-            simulation._rmw_grippers = EliteGrippers(simulation)
-        self.grippers = simulation._rmw_grippers
+        if not hasattr(simulation, '_xmv_grippers'):
+            simulation._xmv_grippers = EliteGrippers(simulation)
+        self.grippers = simulation._xmv_grippers
         names = tuple(f'{side}_{joint}' for side in simulation.arms for joint in simulation.joint_names)
         # Some source URDFs expand mimic fingers for Pinocchio. Keep exactly the
         # source model's representation; only independent finger joints are commanded.
@@ -271,7 +271,7 @@ class EliteRerunView:
             try:
                 self.renderer.recording.disconnect()
             finally:
-                self.renderer.recording._rmw_server = None
+                self.renderer.recording._xmv_server = None
 
     def close(self, timeout=1.):
         if self._display:
@@ -308,7 +308,7 @@ class EliteRerunView:
 
     def follow_live(self):
         """A deliberate Qt edit requests current display time, off the UI thread."""
-        if getattr(self.renderer.recording, '_rmw_server', None) is None:
+        if getattr(self.renderer.recording, '_xmv_server', None) is None:
             return False
         if self._display:
             return self._display.publish(self._last_state, self.collision_visible, follow_live=True)
@@ -445,7 +445,7 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
             button.clicked.disconnect()
             if view:
                 button.clicked.connect(view.open)
-                button.setEnabled(getattr(view.renderer.recording, '_rmw_server', None) is not None)
+                button.setEnabled(getattr(view.renderer.recording, '_xmv_server', None) is not None)
     receipt_label = qt['QLabel']('Input owner: qt · target submission does not mean sent or achieved.')
     receipt_label.setWordWrap(True)
     window.centralWidget().layout().addWidget(receipt_label)
@@ -585,7 +585,7 @@ def _open_recording_viewer(recording, port, *, prepare=None):
     import time
     import rerun as rr
     from rerun.experimental import ViewerClient
-    server = getattr(recording, '_rmw_server', None)
+    server = getattr(recording, '_xmv_server', None)
     if server is None:
         raise RuntimeError('Live viewing was not configured; restart without --no-viewer or replay the saved RRD')
     deadline = perf_counter() + 3.
@@ -612,7 +612,7 @@ def _recording(path, *, viewer_port=None):
     rr.set_strict_mode(True)
     # SDK default microbatch tick is 200ms, visible as drag latency even when
     # Python logging is fast. Match the Elite display's 30Hz delivery cadence.
-    recording = rr.RecordingStream('robot-motion-workbench-elite',
+    recording = rr.RecordingStream('xense-motion-viewer-elite',
                                    batcher_config=rr.ChunkBatcherConfig(flush_tick=.033))
     sinks = []
     if path is not None:
@@ -623,12 +623,12 @@ def _recording(path, *, viewer_port=None):
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             server_port = sock.getsockname()[1]
-        recording._rmw_server = rr.GrpcServerSink(bind_ip='127.0.0.1', port=server_port,
+        recording._xmv_server = rr.GrpcServerSink(bind_ip='127.0.0.1', port=server_port,
                                                  server_memory_limit='64MiB')
-        sinks.append(recording._rmw_server)
+        sinks.append(recording._xmv_server)
     if sinks:
         recording.set_sinks(*sinks)
-    recording._rmw_save_path = path
+    recording._xmv_save_path = path
     if viewer_port is not None:
         _open_recording_viewer(recording, viewer_port)
     return recording
@@ -668,7 +668,7 @@ def _qt_environment():
     # CLI bootstrap: it execs libpyelite.sim and would launch the Meshcat CLI.
     spec = importlib.util.find_spec('PySide6')
     if spec is None or spec.origin is None:
-        raise RuntimeError('Install robot-motion-workbench[qt] for the Qt input UI')
+        raise RuntimeError('Install xense-motion-viewer[qt] for the Qt input UI')
     root = Path(spec.origin).parent / 'Qt'
     if (root / 'plugins/platforms').is_dir():
         os.environ['QT_PLUGIN_PATH'] = str(root / 'plugins')
@@ -683,7 +683,7 @@ def qt_main(argv=None):
             (qt_lib / 'libQt6Core.so.6').is_file() and (not paths or paths[0] != str(qt_lib))):
         env = os.environ.copy()
         env['LD_LIBRARY_PATH'] = ':'.join([str(qt_lib), *[p for p in paths if p != str(qt_lib)]])
-        os.execve(sys.executable, [sys.executable, '-m', 'robot_motion_workbench.adapters.elite', *sys.argv[1:]], env)
+        os.execve(sys.executable, [sys.executable, '-m', 'xense_motion_viewer.adapters.elite', *sys.argv[1:]], env)
     parser = _parser(qt=True)
     args = parser.parse_args(argv)
     if not np.isfinite(args.xyz_range) or args.xyz_range <= 0:

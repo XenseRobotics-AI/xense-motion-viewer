@@ -3,11 +3,14 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "robot-motion-workbench"
+name = "xense-motion-viewer"
 version = "0.4.1"
 description = "Elite CS66 offline motion workbench with Qt control, policy references and Rerun visualization"
 requires-python = ">=3.12"
 dependencies = ["numpy>=2,<3"]
+
+[project.urls]
+Repository = "https://github.com/XenseRobotics-AI/xense-motion-viewer"
 
 [project.optional-dependencies]
 rerun = ["rerun-sdk==0.38.1", "trimesh==5.1.1", "pycollada==0.9.3"]
@@ -16,13 +19,13 @@ qt = ["PySide6>=6.6,<7"]
 test = ["pytest>=8"]
 
 [project.scripts]
-rmw-elite-record = "robot_motion_workbench.adapters.elite:record_main"
-rmw-elite-qt = "robot_motion_workbench.adapters.elite:qt_main"
-rmw-elite-policy = "robot_motion_workbench.adapters.elite_policy:main"
-rmw-policy-replay = "robot_motion_workbench.adapters.elite_policy:replay_main"
+xmv-elite-record = "xense_motion_viewer.adapters.elite:record_main"
+xmv-elite-qt = "xense_motion_viewer.adapters.elite:qt_main"
+xmv-elite-policy = "xense_motion_viewer.adapters.elite_policy:main"
+xmv-policy-replay = "xense_motion_viewer.adapters.elite_policy:replay_main"
 
 [tool.setuptools.package-data]
-robot_motion_workbench = ["assets/*.npz"]
+xense_motion_viewer = ["assets/*.npz"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

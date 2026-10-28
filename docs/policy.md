@@ -1,6 +1,6 @@
 # Policy 参考、轨迹与遥测
 
-`rmw-elite-policy` 将采集动作或手写目标作为参考，驱动原生 Elite 双臂仿真。
+`xmv-elite-policy` 将采集动作或手写目标作为参考，驱动原生 Elite 双臂仿真。
 它不运行模型推理；显示和回放都不取得机器人输入权。
 
 ## 参考与执行
@@ -38,7 +38,7 @@ XYZ 单位为米，6D 姿态表示旋转矩阵的前两列，加载时正交化�
 ```sh
 python scripts/import_elite_episode.py /path/to/dataset \
   --episode 1 --output recordings/episode-1.npz
-rmw-elite-policy --trajectory recordings/episode-1.npz
+xmv-elite-policy --trajectory recordings/episode-1.npz
 ```
 
 导入需要 PyArrow，随 `rerun` 可选依赖安装。输入数据集须为 `v3.0` 格式，
@@ -95,5 +95,5 @@ Elite 按显示周期将参考变化、提交记录和当前状态一起入队�
 显示录制也不作为完整控制审计。
 
 关闭时先释放输入，再限时排空显示队列、刷新并断开 Rerun。
-`rmw-policy-replay recording.rrd` 只启动 Viewer，`replay_events()` 只消费不可变事件，
+`xmv-policy-replay recording.rrd` 只启动 Viewer，`replay_events()` 只消费不可变事件，
 两者都不会执行录制中的目标。

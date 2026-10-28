@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from robot_motion_workbench.adapters.elite_trajectory import (
+from xense_motion_viewer.adapters.elite_trajectory import (
     DEFAULT_TRAJECTORY, RecordedTrajectory, tcp_poses_from_actions,
 )
 
@@ -96,9 +96,9 @@ def test_display_samples_follow_time_grid_and_include_final_state(monkeypatch, c
     pytest.importorskip('libpyelite')
     pytest.importorskip('rerun')
     from libpyelite.sim import StationSimulation
-    from robot_motion_workbench.adapters import elite
-    from robot_motion_workbench.adapters.elite_policy import main
-    from robot_motion_workbench.streams import VisualizationWorker
+    from xense_motion_viewer.adapters import elite
+    from xense_motion_viewer.adapters.elite_policy import main
+    from xense_motion_viewer.streams import VisualizationWorker
 
     settings = dict(StationSimulation().settings, servoj_time=period)
     simulation = StationSimulation(settings=settings, collision_profile='auto')
@@ -129,8 +129,8 @@ def test_display_samples_follow_time_grid_and_include_final_state(monkeypatch, c
 def test_cli_submits_recorded_actions_at_source_times_across_chunk_boundary(tmp_path, capsys, monkeypatch, arm):
     pytest.importorskip('libpyelite')
     pytest.importorskip('rerun')
-    from robot_motion_workbench.adapters.elite_policy import main
-    from robot_motion_workbench.adapters.elite import EliteStationAdapter
+    from xense_motion_viewer.adapters.elite_policy import main
+    from xense_motion_viewer.adapters.elite import EliteStationAdapter
     arms = ('left', 'right') if arm == 'both' else (arm,)
     trajectories = {side: RecordedTrajectory(arm=side) for side in arms}
     original_step = EliteStationAdapter.step

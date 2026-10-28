@@ -4,13 +4,13 @@ from threading import Event, Thread
 import numpy as np
 import pytest
 
-from robot_motion_workbench import (
+from xense_motion_viewer import (
     CallbackRobotAdapter, ControlCapabilities, JointControl, JointPreview,
     JointTarget, PolicyChunk, PolicyInput, RobotDescription, RobotSession,
     RobotState, SampleTime, StepRef, StreamEvent, TcpControl, VisualizationWorker,
     replay_events,
 )
-from robot_motion_workbench.policy_renderer import event_data
+from xense_motion_viewer.policy_renderer import event_data
 
 
 @pytest.fixture

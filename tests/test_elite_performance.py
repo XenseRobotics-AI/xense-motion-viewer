@@ -13,10 +13,10 @@ import pytest
 
 pytest.importorskip('libpyelite')
 from libpyelite.sim import StationSimulation
-from robot_motion_workbench import RobotState
-from robot_motion_workbench.adapters.elite import EliteStationAdapter, EliteSandboxRuntime, _LatestDisplay
-from robot_motion_workbench.rerun_renderer import RerunRenderer
-from robot_motion_workbench.urdf import URDFModel, xyz_rpy
+from xense_motion_viewer import RobotState
+from xense_motion_viewer.adapters.elite import EliteStationAdapter, EliteSandboxRuntime, _LatestDisplay
+from xense_motion_viewer.rerun_renderer import RerunRenderer
+from xense_motion_viewer.urdf import URDFModel, xyz_rpy
 
 pytestmark = pytest.mark.elite
 
@@ -65,7 +65,7 @@ def test_display_errors_are_observable_and_finish_runs_once():
 def test_display_interval_includes_processing_time_and_handles_overruns(monkeypatch, hz):
     from threading import Condition
     from types import SimpleNamespace
-    from robot_motion_workbench.adapters import elite
+    from xense_motion_viewer.adapters import elite
 
     clock, starts = [0.], []
     period = 1 / hz
@@ -99,7 +99,7 @@ def test_display_interval_includes_processing_time_and_handles_overruns(monkeypa
 
 
 def test_policy_coalesces_pending_feedback_without_discarding_send_or_origin_change():
-    from robot_motion_workbench import SampleTime, StreamEvent, VisualizationWorker
+    from xense_motion_viewer import SampleTime, StreamEvent, VisualizationWorker
     entered, release = Event(), Event()
     observed = []
     def consume(event):
@@ -125,7 +125,7 @@ def test_policy_coalesces_pending_feedback_without_discarding_send_or_origin_cha
 
 def test_rendering_preserves_every_native_step_and_collision_sample(tmp_path):
     import rerun as rr
-    from robot_motion_workbench.adapters.elite import EliteRerunView
+    from xense_motion_viewer.adapters.elite import EliteRerunView
     actual = StationSimulation(collision_profile='auto')
     direct = StationSimulation(collision_profile='auto')
     for sim in (actual, direct):

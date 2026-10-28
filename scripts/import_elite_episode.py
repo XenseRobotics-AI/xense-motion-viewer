@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
 
-from robot_motion_workbench.adapters.elite_trajectory import RecordedTrajectory
+from xense_motion_viewer.adapters.elite_trajectory import RecordedTrajectory
 
 
 def export_episode(root, episode, output):

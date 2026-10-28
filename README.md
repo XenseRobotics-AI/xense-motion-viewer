@@ -1,4 +1,4 @@
-# Robot Motion Workbench
+# Xense Motion Viewer
 
 Elite CS66 双臂离线运动工作台，使用原生 `libpyelite` 仿真、Qt 输入面板和 Rerun 可视化。
 
@@ -30,10 +30,10 @@ Rerun SDK 固定为 **0.38.1**，请使用同环境附带的 Viewer。已有环�
 
 ```sh
 # Qt 交互面板与实时 Rerun Viewer
-rmw-elite-qt --collision-profile auto
+xmv-elite-qt --collision-profile auto
 
 # 双臂策略参考与仿真反馈
-rmw-elite-policy
+xmv-elite-policy
 ```
 
 Qt 提交运动目标，由原生仿真按速度、加速度与碰撞约束推进。Joint / IK 页的夹爪输入同步，0% 为闭合、100% 为张开，实际开度单独显示。碰撞包络开关只改变显示；`--collision-profile off` 才会关闭碰撞检查。
@@ -56,11 +56,11 @@ Policy 默认播放包内 episode 0：4451 帧、30 Hz、约 148 秒，左右臂
 ## 录制与回放
 
 ```sh
-rmw-elite-qt --collision-profile auto --save recordings/elite-qt.rrd
-rmw-elite-policy --save recordings/elite-policy.rrd
+xmv-elite-qt --collision-profile auto --save recordings/elite-qt.rrd
+xmv-elite-policy --save recordings/elite-policy.rrd
 
 # 结束对应应用、完成写入后回放
-rmw-policy-replay recordings/elite-policy.rrd
+xmv-policy-replay recordings/elite-policy.rrd
 ```
 
 关闭 Viewer 不会停止仿真或录制；Qt 的“打开 Rerun”按钮可重连。Qt / Policy 默认 Viewer 端口为 9876 / 9877，可用 `--port` 修改。`--no-viewer` 禁用实时 Viewer，仍可录制。
@@ -68,11 +68,11 @@ rmw-policy-replay recordings/elite-policy.rrd
 无需界面的有限步数验证：
 
 ```sh
-rmw-elite-policy --no-viewer --fast --steps 320 --save recordings/smoke.rrd
+xmv-elite-policy --no-viewer --fast --steps 320 --save recordings/smoke.rrd
 python -m rerun rrd verify recordings/smoke.rrd
 ```
 
-`rmw-elite-record` 可单独录制原生仿真状态。录制采用显示采样，可能合并或丢弃显示帧，不是逐控制周期的完整记录；提交成功也不代表已发送或已到达。
+`xmv-elite-record` 可单独录制原生仿真状态。录制采用显示采样，可能合并或丢弃显示帧，不是逐控制周期的完整记录；提交成功也不代表已发送或已到达。
 
 ## 开发与文档
 

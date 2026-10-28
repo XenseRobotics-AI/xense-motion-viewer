@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from robot_motion_workbench import RobotState
-from robot_motion_workbench.adapters.elite import EliteRerunView, _LatestDisplay, _open_recording_viewer
+from xense_motion_viewer import RobotState
+from xense_motion_viewer.adapters.elite import EliteRerunView, _LatestDisplay, _open_recording_viewer
 
 
 def test_finish_always_disconnects_after_failed_flush():
@@ -18,7 +18,7 @@ def test_finish_always_disconnects_after_failed_flush():
     with pytest.raises(RuntimeError, match='flush timed out'):
         view._finish()
     assert calls == [('flush', .5), ('disconnect',)]
-    assert view.renderer.recording._rmw_server is None
+    assert view.renderer.recording._xmv_server is None
 
 
 @pytest.mark.parametrize('display_action', ['open_viewer', 'follow_live'])
@@ -55,7 +55,7 @@ def test_already_connected_open_keeps_current_blueprint_camera_and_sinks(monkeyp
     client = SimpleNamespace(viewer_state=lambda: SimpleNamespace(active_recording='Recording:app:abc'), open_url=unexpected)
     monkeypatch.setattr(rr, 'spawn', lambda **kwargs: calls.append('ensure-viewer'))
     monkeypatch.setattr(ViewerClient, 'connect', lambda url: client)
-    recording = SimpleNamespace(_rmw_server=SimpleNamespace(uri='unused'), get_recording_id=lambda: 'abc')
+    recording = SimpleNamespace(_xmv_server=SimpleNamespace(uri='unused'), get_recording_id=lambda: 'abc')
     assert _open_recording_viewer(recording, 12345, prepare=unexpected) is False
     assert calls == ['ensure-viewer']
 

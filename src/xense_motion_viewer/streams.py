@@ -45,7 +45,7 @@ class VisualizationWorker:
         self._coalesce_feedback = coalesce_feedback
         self._batch = batch
         self._coalesced = 0
-        self._thread = Thread(target=self._run, name='rmw-visualization', daemon=True)
+        self._thread = Thread(target=self._run, name='xmv-visualization', daemon=True)
         self._thread.start()
 
     def publish(self, event):

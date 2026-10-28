@@ -7,10 +7,10 @@ import pytest
 import rerun as rr
 from rerun.chunk import RrdReader
 
-from robot_motion_workbench import (CallbackRobotAdapter, ControlCapabilities,
+from xense_motion_viewer import (CallbackRobotAdapter, ControlCapabilities,
     JointControl, JointTarget, PolicyChunk, PolicyInput, RobotDescription,
     RobotSession, RobotState, SampleTime, StepRef, StreamEvent, VisualizationWorker)
-from robot_motion_workbench.policy_renderer import PolicyRerunRenderer
+from xense_motion_viewer.policy_renderer import PolicyRerunRenderer
 
 
 def rows(chunks, path, component):

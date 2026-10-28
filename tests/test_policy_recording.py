@@ -6,11 +6,11 @@ import pyarrow as pa
 import rerun as rr
 from rerun.chunk import RrdReader
 
-from robot_motion_workbench import (JointPreview, JointTarget, PolicyChunk,
+from xense_motion_viewer import (JointPreview, JointTarget, PolicyChunk,
     RobotDescription, RobotState, SampleTime, StepRef, StreamEvent, SubmissionReceipt,
     ToolFrame, replay_events)
-from robot_motion_workbench.policy_renderer import PolicyRerunRenderer
-from robot_motion_workbench.rerun_renderer import segment
+from xense_motion_viewer.policy_renderer import PolicyRerunRenderer
+from xense_motion_viewer.rerun_renderer import segment
 
 
 def rows(chunks, path, component):
