@@ -24,7 +24,7 @@ python -m pip install /path/to/libpyelite-0.1.0-cp312-cp312-linux_x86_64.whl
 python -m pip install -e '.[elite,rerun,qt]'
 ```
 
-Rerun SDK 固定为 **0.38.1**，请使用同环境附带的 Viewer。已有环境只需激活 `.venv`；更新本项目源码后的入口可用 `python -m pip install --no-deps -e .` 刷新。
+Rerun SDK 固定为 **0.26.2**，与 xense-openpi 的 lerobot 约束兼容，请使用同环境附带的 Viewer。已有环境只需激活 `.venv`；更新本项目源码后的入口可用 `python -m pip install --no-deps -e .` 刷新。
 
 ## 快速开始
 

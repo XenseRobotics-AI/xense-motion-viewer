@@ -13,7 +13,7 @@ dependencies = ["numpy>=2,<3"]
 Repository = "https://github.com/XenseRobotics-AI/xense-motion-viewer"
 
 [project.optional-dependencies]
-rerun = ["rerun-sdk==0.38.1", "trimesh==5.1.1", "pycollada==0.9.3"]
+rerun = ["rerun-sdk==0.26.2", "trimesh==5.1.1", "pycollada==0.9.3"]
 elite = ["libpyelite==0.1.0", "PyYAML>=6"]
 qt = ["PySide6>=6.6,<7"]
 test = ["pytest>=8"]

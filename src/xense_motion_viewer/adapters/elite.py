@@ -14,6 +14,7 @@ import numpy as np
 from ..contracts import AttachedMesh, RobotDescription, RobotState, ToolFrame
 from ..control import ControlCapabilities, JointControl, JointTarget, RobotSession, TcpControl, TcpTarget
 from ..urdf import xyz_rpy
+from ..rerun_compat import connect_viewer
 
 
 class EliteStationAdapter:
@@ -315,14 +316,15 @@ class EliteRerunView:
         return self._follow_live(self._last_state, self.collision_visible)
 
     def _follow_live(self, state, visible):
-        from rerun.experimental import ViewerClient
         now = perf_counter()
         if now - self._last_follow < .5:
             return False  # Coalesce a continuous mouse drag, not every display tick.
         self._last_follow = now
         recording = self.renderer.recording
         try:
-            client = ViewerClient.connect(f'rerun+http://127.0.0.1:{self.port}/proxy')
+            client = connect_viewer(f'rerun+http://127.0.0.1:{self.port}/proxy')
+            if client is None:
+                return False
             active = client.viewer_state().active_recording
             if not (active or '').endswith(':' + recording.get_recording_id()):
                 self._open(state, visible)
@@ -584,7 +586,6 @@ def _open_recording_viewer(recording, port, *, prepare=None):
     """Display-owner operation; never replaces sinks or reopens the file."""
     import time
     import rerun as rr
-    from rerun.experimental import ViewerClient
     server = getattr(recording, '_xmv_server', None)
     if server is None:
         raise RuntimeError('Live viewing was not configured; restart without --no-viewer or replay the saved RRD')
@@ -593,11 +594,20 @@ def _open_recording_viewer(recording, port, *, prepare=None):
         try:
             rr.spawn(port=port, connect=False, recording=recording,
                      executable_path=str(Path(sys.executable).parent / 'rerun'))
-            client = ViewerClient.connect(f'rerun+http://127.0.0.1:{port}/proxy')
+            client = connect_viewer(f'rerun+http://127.0.0.1:{port}/proxy')
+            if client is None:
+                if prepare is not None:
+                    prepare()
+                return True
             if (client.viewer_state().active_recording or '').endswith(':' + recording.get_recording_id()):
                 return False  # Already viewing this recording: preserve camera.
             if prepare is not None:
                 prepare()
+            if getattr(recording, '_xmv_legacy_viewer', False):
+                # 0.26 streams directly to the Viewer alongside its file sink.
+                # Reconnect uses that existing transport; never open its own
+                # proxy recursively or replace/truncate the recording sink.
+                return True
             client.open_url(server.uri)
             return True
         except ConnectionError:
@@ -619,13 +629,22 @@ def _recording(path, *, viewer_port=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         sinks.append(rr.FileSink(path))
     if viewer_port is not None:
-        import socket
-        with socket.socket() as sock:
-            sock.bind(('127.0.0.1', 0))
-            server_port = sock.getsockname()[1]
-        recording._xmv_server = rr.GrpcServerSink(bind_ip='127.0.0.1', port=server_port,
-                                                 server_memory_limit='64MiB')
-        sinks.append(recording._xmv_server)
+        if hasattr(rr, 'GrpcServerSink'):
+            import socket
+            with socket.socket() as sock:
+                sock.bind(('127.0.0.1', 0))
+                server_port = sock.getsockname()[1]
+            recording._xmv_server = rr.GrpcServerSink(bind_ip='127.0.0.1', port=server_port,
+                                                     server_memory_limit='64MiB')
+            sinks.append(recording._xmv_server)
+        else:
+            from types import SimpleNamespace
+            rr.spawn(port=viewer_port, connect=False, recording=recording,
+                     executable_path=str(Path(sys.executable).parent / 'rerun'))
+            uri = f'rerun+http://127.0.0.1:{viewer_port}/proxy'
+            recording._xmv_server = SimpleNamespace(uri=uri)
+            recording._xmv_legacy_viewer = True
+            sinks.append(rr.GrpcSink(uri))
     if sinks:
         recording.set_sinks(*sinks)
     recording._xmv_save_path = path

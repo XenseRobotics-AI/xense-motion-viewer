@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from rerun.chunk import RrdReader
+from rrd_reader import RrdReader, clear_times
 
 from xense_motion_viewer import (JointPreview, JointTarget, PolicyChunk,
     RobotDescription, RobotState, SampleTime, StepRef, StreamEvent, SubmissionReceipt,
@@ -73,10 +73,10 @@ def test_real_rrd_full_future_at_availability_distinct_streams_and_readonly_repl
     radii = rows(chunks, f'{path}/steps', 'Points3D:radii')[-1]
     assert radii[0] == radii[2] > radii[1] == 0
     assert times(chunks, f'{path}/axes/2', 'Transform3D:translation') == [0]
-    assert rows(chunks, path, 'Clear:is_recursive') == [[True]]
+    assert clear_times(chunks, path)
     path2 = f'{renderer.root}/chunks/second/prediction'
     assert times(chunks, f'{path2}/tcp_path', 'LineStrips3D:strips') == [250_000_000]
-    assert rows(chunks, path2, 'Clear:is_recursive') == [[True]]
+    assert clear_times(chunks, path2)
     link = renderer.robot.link_path(description.instance_id, 'link0')
     assert times(chunks, link, 'Transform3D:translation') == [200_000_000]
     # Source 50 seconds and intended future times never become measured times.

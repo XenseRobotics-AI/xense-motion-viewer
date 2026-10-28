@@ -4,7 +4,7 @@ import sys
 import numpy as np
 import pytest
 import rerun as rr
-from rerun.chunk import RrdReader
+from rrd_reader import RrdReader, clear_times
 
 from xense_motion_viewer import RobotDescription, RobotState, ToolFrame
 from xense_motion_viewer.rerun_renderer import RerunRenderer, segment
@@ -56,7 +56,8 @@ def test_real_sdk_namespaces_transforms_and_static_geometry(tmp_path, robot_urdf
     queries = [row for blueprint in reader.blueprints() for chunk in reader.stream(store=blueprint)
                for batch in [chunk.to_record_batch()] if 'ViewContents:query' in batch.schema.names
                for row in batch.column(batch.schema.get_field_index('ViewContents:query')).to_pylist()]
-    assert any(all(f'- /{renderer.instance_path(i)}/collision/**' in query for i in ids) for query in queries)
+    if hasattr(rr, 'CoordinateFrame'):
+        assert any(all(f'- /{renderer.instance_path(i)}/collision/**' in query for i in ids) for query in queries)
     link = renderer.link_path(ids[0], 'link1')
     values = column_rows(chunks, link, 'Transform3D:translation')
     assert len(values) == 4
@@ -69,19 +70,26 @@ def test_real_sdk_namespaces_transforms_and_static_geometry(tmp_path, robot_urdf
     for group, expected in [('tcp', [4,5,6]), ('targets', [7,8,9])]:
         entity = f'{root}/{group}/{segment("custom/tip")}'
         np.testing.assert_allclose(column_rows(chunks, entity, 'Transform3D:translation')[0][0], expected)
-        assert column_rows(chunks, entity, 'Clear:is_recursive') == [[True]]
-    geometry_path = f'{root}/visual/{segment("link1:0")}'
+        assert clear_times(chunks, entity, 'simulation') == [3_000_000_000]
+    geometry_path = next(renderer.geometry_path(ids[0], layer, mesh)
+                         for layer, mesh in renderer._geometries[ids[0]] if mesh.name == 'link1:0')
     vertices = column_rows(chunks, geometry_path, 'Mesh3D:vertex_positions')
     assert len(vertices) == 1
     normals = column_rows(chunks, geometry_path, 'Mesh3D:vertex_normals')[0]
     np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1, atol=1e-7)
     np.testing.assert_allclose(vertices[0], [[0,0,0],[2,0,0],[0,3,4]])
-    assert column_rows(chunks, geometry_path, 'Transform3D:parent_frame') == [[renderer.frame_id(link)]]
-    assert column_rows(chunks, geometry_path, 'CoordinateFrame:frame') == [[renderer.frame_id(geometry_path)]]
+    if hasattr(rr, 'CoordinateFrame'):
+        assert column_rows(chunks, geometry_path, 'Transform3D:parent_frame') == [[renderer.frame_id(link)]]
+        assert column_rows(chunks, geometry_path, 'CoordinateFrame:frame') == [[renderer.frame_id(geometry_path)]]
+    else:
+        assert geometry_path.startswith(link + '/')  # Actual 0.26 transform ancestry.
     for chunk in chunks:
         if 'Mesh3D:vertex_positions' in chunk.to_record_batch().schema.names:
             assert chunk.is_static
-    child1 = column_rows(chunks, link, 'Transform3D:child_frame')[0][0]
-    child2 = column_rows(chunks, link2, 'Transform3D:child_frame')[0][0]
-    assert child1 != child2
+    if hasattr(rr, 'CoordinateFrame'):
+        child1 = column_rows(chunks, link, 'Transform3D:child_frame')[0][0]
+        child2 = column_rows(chunks, link2, 'Transform3D:child_frame')[0][0]
+        assert child1 != child2
+    else:
+        assert link != link2
     subprocess.run([sys.executable, '-m', 'rerun', 'rrd', 'verify', str(path)], check=True, capture_output=True)

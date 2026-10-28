@@ -6,6 +6,7 @@ import pytest
 
 from xense_motion_viewer import RobotState
 from xense_motion_viewer.adapters.elite import EliteRerunView, _LatestDisplay, _open_recording_viewer
+from xense_motion_viewer.adapters import elite as elite_module
 
 
 def test_finish_always_disconnects_after_failed_flush():
@@ -48,25 +49,23 @@ def test_open_request_survives_state_coalescing_and_stays_on_display_owner(displ
 
 def test_already_connected_open_keeps_current_blueprint_camera_and_sinks(monkeypatch):
     import rerun as rr
-    from rerun.experimental import ViewerClient
     calls = []
     def unexpected(*args):
         raise AssertionError('Already active recording must not be reopened or replayed')
     client = SimpleNamespace(viewer_state=lambda: SimpleNamespace(active_recording='Recording:app:abc'), open_url=unexpected)
     monkeypatch.setattr(rr, 'spawn', lambda **kwargs: calls.append('ensure-viewer'))
-    monkeypatch.setattr(ViewerClient, 'connect', lambda url: client)
+    monkeypatch.setattr(elite_module, 'connect_viewer', lambda url: client)
     recording = SimpleNamespace(_xmv_server=SimpleNamespace(uri='unused'), get_recording_id=lambda: 'abc')
     assert _open_recording_viewer(recording, 12345, prepare=unexpected) is False
     assert calls == ['ensure-viewer']
 
 
 def test_gripper_edit_resumes_current_recording_without_changing_camera_or_blueprint(monkeypatch):
-    from rerun.experimental import ViewerClient
     calls = []
     client = SimpleNamespace(
         viewer_state=lambda: SimpleNamespace(active_recording='Recording:app:abc'),
         set_time=lambda *args, **kwargs: calls.append(('time', args, kwargs)))
-    monkeypatch.setattr(ViewerClient, 'connect', lambda url: client)
+    monkeypatch.setattr(elite_module, 'connect_viewer', lambda url: client)
     view = EliteRerunView.__new__(EliteRerunView)
     view.port, view._last_follow = 9876, 0.
     view.renderer = SimpleNamespace(timeline='sandbox_elapsed', recording=SimpleNamespace(
@@ -77,3 +76,13 @@ def test_gripper_edit_resumes_current_recording_without_changing_camera_or_bluep
     # A drag's repeated valueChanged events do not cause per-frame RPCs.
     assert not view._follow_live(RobotState(12.51, {'q': 0}), False)
     assert len(calls) == 2
+
+
+def test_viewer_without_state_rpc_reopens_transport_without_replacing_sinks(monkeypatch):
+    import rerun as rr
+    calls = []
+    monkeypatch.setattr(rr, 'spawn', lambda **kwargs: calls.append('ensure-viewer'))
+    monkeypatch.setattr(elite_module, 'connect_viewer', lambda url: None)
+    recording = SimpleNamespace(_xmv_server=SimpleNamespace(uri='unused'))
+    assert _open_recording_viewer(recording, 12345, prepare=lambda: calls.append('refresh'))
+    assert calls == ['ensure-viewer', 'refresh']

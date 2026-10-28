@@ -5,7 +5,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import rerun as rr
-from rerun.chunk import RrdReader
+from rrd_reader import RrdReader, clear_times
 
 from xense_motion_viewer import (CallbackRobotAdapter, ControlCapabilities,
     JointControl, JointTarget, PolicyChunk, PolicyInput, RobotDescription,
@@ -73,7 +73,7 @@ def test_available_origin_transitions_clear_tcp_history_without_changing_raw_str
     paths = rows(chunks, f'{renderer.root}/feedback_path/tool', 'LineStrips3D:strips')
     assert [len(value[0]) for _, value in paths] == [1, 1, 2, 1]
     np.testing.assert_allclose([point[0] for point in paths[2][1][0]], [.8, .9])
-    assert [t for t, _ in rows(chunks, f'{renderer.root}/feedback_path', 'Clear:is_recursive')] == [2_000_000_000, 4_000_000_000]
+    assert clear_times(chunks, f'{renderer.root}/feedback_path') == [2_000_000_000, 4_000_000_000]
     raw = documents(chunks, f'{renderer.panel}/streams/feedback')
     assert [e['origin'] for e in raw] == ['simulated', 'measured', 'measured', 'simulated']
     assert [e['feedback']['tcp_poses']['tool'][0][3] for e in raw] == [.1, .8, .9, .2]

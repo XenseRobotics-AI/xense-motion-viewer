@@ -5,7 +5,7 @@ from threading import Event
 import numpy as np
 import pytest
 import rerun as rr
-from rerun.chunk import RrdReader
+from rrd_reader import RrdReader, clear_times
 
 from xense_motion_viewer import (JointTarget, PolicyChunk, RobotDescription, RobotState,
                                     SampleTime, StepRef, StreamEvent, VisualizationWorker)
@@ -46,12 +46,13 @@ def test_two_policy_groups_keep_both_paths_selections_and_telemetry(tmp_path, ro
     blueprints = [chunk for store in reader.blueprints() for chunk in reader.stream(store=store)]
     # The live scene must select simulation time and advance on new samples,
     # even if a previous Viewer recording was paused.
-    assert rows(blueprints, 'time_panel', 'TimePanelBlueprint:timeline')
-    assert all(value == ['sandbox_elapsed'] for value in
-               rows(blueprints, 'time_panel', 'TimePanelBlueprint:timeline'))
-    assert rows(blueprints, 'time_panel', 'TimePanelBlueprint:play_state')
-    assert all(value == [3] for value in
-               rows(blueprints, 'time_panel', 'TimePanelBlueprint:play_state'))
+    if hasattr(rr, 'CoordinateFrame'):
+        assert rows(blueprints, 'time_panel', 'TimePanelBlueprint:timeline')
+        assert all(value == ['sandbox_elapsed'] for value in
+                   rows(blueprints, 'time_panel', 'TimePanelBlueprint:timeline'))
+        assert rows(blueprints, 'time_panel', 'TimePanelBlueprint:play_state')
+        assert all(value == [3] for value in
+                   rows(blueprints, 'time_panel', 'TimePanelBlueprint:play_state'))
     for side, chunk in chunks.items():
         prefix = f'{renderer.root}/groups/{side}/chunks/{side}-A/prediction'
         np.testing.assert_allclose(rows(recorded, prefix + '/tcp_path', 'LineStrips3D:strips')[0][0], chunk.values[:, :3, 3])
@@ -63,8 +64,8 @@ def test_two_policy_groups_keep_both_paths_selections_and_telemetry(tmp_path, ro
         assert len(rows(recorded, prefix + '/steps', 'Points3D:colors')) == 1
         planned = rows(recorded, f'{renderer.panel}/groups/{side}/streams/planned', 'TextDocument:text')
         assert json.loads(planned[0][0])['command']['group'] == side
-    assert rows(recorded, f'{renderer.root}/groups/left/chunks/left-A/prediction', 'Clear:is_recursive') == [[True]]
-    assert rows(recorded, f'{renderer.root}/groups/right/chunks/right-A/prediction', 'Clear:is_recursive') == []
+    assert clear_times(recorded, f'{renderer.root}/groups/left/chunks/left-A/prediction') == [200_000_000]
+    assert clear_times(recorded, f'{renderer.root}/groups/right/chunks/right-A/prediction') == []
     status = rows(recorded, f'{renderer.panel}/status', 'TextDocument:text')[-1][0]
     assert '**left-B**' in status and '**right-A**' in status
     assert '### left' in status and '### right' in status

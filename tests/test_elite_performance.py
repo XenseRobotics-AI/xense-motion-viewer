@@ -152,7 +152,7 @@ def test_rendering_preserves_every_native_step_and_collision_sample(tmp_path):
 
 def test_compact_recording_preserves_fk_base_mimics_tools_and_exact_collision_batches(tmp_path):
     import rerun as rr
-    from rerun.chunk import RrdReader
+    from rrd_reader import RrdReader
     sim = StationSimulation(collision_profile='auto')
     adapter = EliteStationAdapter(sim)
     description = replace(adapter.describe(), base_transform=xyz_rpy((.2, -.1, .3), (.1, .2, .3)))
@@ -173,10 +173,11 @@ def test_compact_recording_preserves_fk_base_mimics_tools_and_exact_collision_ba
     recording.flush(); recording.disconnect()
     placements = model.link_transforms(moved, override)
     local, parents, latest = {}, {}, {}
+    named_frames = hasattr(rr, 'CoordinateFrame')
     descriptors = [column.component_descriptor() for column in
                    rr.Transform3D.columns(translation=[[0, 0, 0]], mat3x3=[np.eye(3)],
                        parent_frame=['parent'], child_frame=['child'],
-                       relation=[rr.TransformRelation.ParentFromChild])]
+                       relation=[rr.TransformRelation.ParentFromChild])] if named_frames else []
     for chunk in RrdReader(path).stream():
         batch = chunk.to_record_batch()
         if 'Transform3D:mat3x3' not in batch.schema.names:
@@ -187,7 +188,7 @@ def test_compact_recording_preserves_fk_base_mimics_tools_and_exact_collision_ba
             metadata = batch.schema.field(descriptor.component).metadata
             assert metadata[b'rerun:component_type'] == descriptor.component_type.encode()
             assert metadata[b'rerun:archetype'] == descriptor.archetype.encode()
-        parent_rows = batch.column('Transform3D:parent_frame').to_pylist()
+        parent_rows = batch.column('Transform3D:parent_frame').to_pylist() if named_frames else [None] * batch.num_rows
         timestamps = (batch.column('simulation').cast('int64').to_pylist()
                       if 'simulation' in batch.schema.names else [-1] * batch.num_rows)
         for timestamp, rotation, translation, parent in zip(timestamps, batch.column('Transform3D:mat3x3').to_pylist(),
@@ -195,13 +196,16 @@ def test_compact_recording_preserves_fk_base_mimics_tools_and_exact_collision_ba
             if rotation is None:
                 continue
             # The named-frame graph needs the edge identity on each pose row.
-            assert parent is not None
-            parents[chunk.entity_path] = '/' + parent[0].removeprefix('tf#/')
+            if named_frames:
+                assert parent is not None
+                parents[chunk.entity_path] = '/' + parent[0].removeprefix('tf#/')
             pose = np.eye(4); pose[:3, :3] = np.array(rotation[0]).reshape(3, 3, order='F'); pose[:3, 3] = translation[0]
             if timestamp >= latest.get(chunk.entity_path, -1):
                 local[chunk.entity_path] = pose
                 latest[chunk.entity_path] = timestamp
     def world(path):
+        if not named_frames:
+            return local[path]
         return np.eye(4) if path == '/world' else world(parents[path]) @ local[path]
     for n, expected in placements.items():
         np.testing.assert_allclose(world('/' + renderer.link_path(description.instance_id, n)), expected, atol=2e-7)
