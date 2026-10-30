@@ -122,14 +122,17 @@ class EliteGrippers:
             self._publish()
 
 
-def make_gripper_panel(inputs, grippers, joint_layouts, *, ik_layouts, on_submit=None):
+def make_gripper_panel(inputs, grippers, joint_layouts, *, ik_layouts, on_submit=None,
+                       follow_layouts=None, follow_inputs=None):
     """Mount synchronized opening controls below each arm's Joint and IK inputs."""
     from types import SimpleNamespace
     from PySide6.QtCore import Qt, QSignalBlocker
     from PySide6.QtWidgets import QDoubleSpinBox, QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget
-    box = SimpleNamespace(sliders={}, editors={}, observed={}, rows={}, statuses={})
-    box.ik = SimpleNamespace(sliders={}, editors={}, observed={}, rows={}, statuses={})
-    panels = (box, box.ik)
+    box = SimpleNamespace(sliders={}, editors={}, observed={}, rows={}, statuses={}, inputs=inputs)
+    box.ik = SimpleNamespace(sliders={}, editors={}, observed={}, rows={}, statuses={}, inputs=inputs)
+    box.follow = (SimpleNamespace(sliders={}, editors={}, observed={}, rows={}, statuses={}, inputs=follow_inputs)
+                  if follow_layouts is not None else None)
+    panels = [box, box.ik] + ([box.follow] if box.follow else [])
 
     def set_target(side, value):
         for panel in panels:
@@ -137,10 +140,10 @@ def make_gripper_panel(inputs, grippers, joint_layouts, *, ik_layouts, on_submit
                 panel.sliders[side].setValue(round(value * 10))
                 panel.editors[side].setValue(value)
 
-    def submit(side, value):
+    def submit(panel, side, value):
         set_target(side, value)
         try:
-            receipt = inputs.submit(grippers.target(side, value / 100))
+            receipt = panel.inputs.submit(grippers.target(side, value / 100))
             message = f'目标 {value:.1f}% 已提交 #{receipt.sequence}'
         except Exception as exc:
             for panel in panels:
@@ -182,18 +185,20 @@ def make_gripper_panel(inputs, grippers, joint_layouts, *, ik_layouts, on_submit
         feedback.addWidget(observed)
         feedback.addWidget(status, 1)
         parent_layout.addWidget(row)
-        slider.valueChanged.connect(lambda value: submit(side, value / 10))
-        edit.valueChanged.connect(lambda value: submit(side, value))
+        slider.valueChanged.connect(lambda value: submit(panel, side, value / 10))
+        edit.valueChanged.connect(lambda value: submit(panel, side, value))
 
     for side in grippers.drivers:
         add_row(box, side, joint_layouts[side])
         add_row(box.ik, side, ik_layouts[side], prefix='ik_')
+        if box.follow:
+            add_row(box.follow, side, follow_layouts[side], prefix='follow_')
 
     def refresh():
         for panel in panels:
             for side in grippers.drivers:
-                panel.sliders[side].setEnabled(inputs.active)
-                panel.editors[side].setEnabled(inputs.active)
+                panel.sliders[side].setEnabled(panel.inputs.active)
+                panel.editors[side].setEnabled(panel.inputs.active)
                 panel.observed[side].setText(f'实际 {100 * grippers.opening(side):.1f}%'
                                            + (' · 碰撞约束保持' if grippers.blocked else ''))
 

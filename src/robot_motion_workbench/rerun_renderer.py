@@ -169,6 +169,14 @@ class RerunRenderer:
         self.recording.send_record_batch(pa.RecordBatch.from_arrays(arrays, schema=pa.schema(fields)),
                                          index=self.timeline)
 
+    def _tcp_marker(self, path, root):
+        target = path.startswith(root + '/targets/')
+        if target or path.startswith(root + '/tcp/'):
+            self.recording.log(path, self.rr.Points3D([[0., 0., 0.]], radii=.008 if target else .005,
+                colors=[(245, 166, 58) if target else (57, 204, 139)],
+                labels=[('Target ' if target else 'TCP ') + path.rsplit('/', 1)[-1]], show_labels=True),
+                self.rr.CoordinateFrame(self.frame_id(path)))
+
     def update(self, instance_id: str, state: RobotState):
         model = self._models[instance_id]
         if state.time < self._last_times.get(instance_id, -1):
@@ -191,6 +199,7 @@ class RerunRenderer:
         for path, (pose, size) in current_frames.items():
             self._transform(path, pose)
             self.recording.log(path, self.rr.TransformAxes3D(size), self.rr.CoordinateFrame(self.frame_id(path)))
+            self._tcp_marker(path, root)
         self._frames[instance_id] = set(current_frames)
         self._last_times[instance_id] = state.time
         self.update_count += 1
@@ -217,6 +226,7 @@ class RerunRenderer:
             self._changed_transform(path, pose, updates)
             if path not in self._frames[instance]:
                 self.recording.log(path, self.rr.TransformAxes3D(size), self.rr.CoordinateFrame(self.frame_id(path)))
+                self._tcp_marker(path, root)
         self._frames[instance] = set(current)
         self._send_transforms(updates, state.time)
         self.recording.log(f'{root}/sample', self.rr.AnyValues(elapsed=state.time))

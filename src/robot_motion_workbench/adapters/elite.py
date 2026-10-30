@@ -359,10 +359,20 @@ class EliteSandboxRuntime:
         self._clock = None
         self._backlog = 0.0
         self.samples = {}
+        self.before_step = self.after_step = self.on_fault = self.on_reset = None
 
     def advance(self, steps=1):
-        for _ in range(steps):
-            self.samples = self.adapter.step()
+        try:
+            for _ in range(steps):
+                if self.before_step:
+                    self.before_step()
+                self.samples = self.adapter.step()
+                if self.after_step:
+                    self.after_step(self.samples)
+        except Exception as exc:
+            if self.on_fault:
+                self.on_fault(exc)
+            raise
         if self.view:
             self.view.update(self.adapter.simulation)
         return self.samples
@@ -386,6 +396,8 @@ class EliteSandboxRuntime:
     def reset_to_home(self):
         self.adapter.reset()
         self._clock, self._backlog, self.samples = None, 0.0, {}
+        if self.on_reset:
+            self.on_reset()
         if self.view:
             self.view.update(self.adapter.simulation)
 
@@ -403,8 +415,11 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
     if view:
         view.start_display()
     session = RobotSession(adapter)
-    inputs = session.activate('qt')
+    from ..follow import QtInputRoutes
+    routes = QtInputRoutes(session)
+    inputs = routes.legacy
     runtime = EliteSandboxRuntime(adapter, view)
+    follow_panel = None
 
     class Facade:
         def __getattr__(self, key):
@@ -418,12 +433,14 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
             return inputs.submit(TcpTarget(side, pose))
 
         def reset(self, q, side='both'):
-            if not inputs.active:
+            if not routes.lease.active:
                 raise ValueError('Qt input ownership is inactive')
             adapter.reset(q, side)
+            if follow_panel:
+                follow_panel.reset()
 
         def reset_to_home(self):
-            if not inputs.active:
+            if not routes.lease.active:
                 raise ValueError('Qt input ownership is inactive')
             runtime.reset_to_home()
 
@@ -437,7 +454,10 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
             view.set_collision_visible(visible)
 
     window = make_window(qt, Facade(), ViewerFacade() if view else None, xyz_range)
-    window.setWindowTitle('Elite CS66 FK / IK — Rerun offline sandbox')
+    window.setWindowTitle('Elite CS66 FK / IK / Follow — Rerun offline sandbox')
+    for label in window.findChildren(qt['QLabel']):
+        if label.text().startswith('Elite CS66 双臂 FK / IK'):
+            label.setText('Elite CS66 双臂 FK / IK / Follow 仿真')
     window.mesh_status.setText('Rerun · offline simulation · no hardware connection')
     for button in window.findChildren(qt['QPushButton']):
         if 'MeshCat' in button.text():
@@ -449,13 +469,32 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
     receipt_label = qt['QLabel']('Input owner: qt · target submission does not mean sent or achieved.')
     receipt_label.setWordWrap(True)
     window.centralWidget().layout().addWidget(receipt_label)
+    from PySide6.QtWidgets import QTabWidget
+    from .elite_follow import FollowPanel
+    tabs = window.findChild(QTabWidget)
+    follow_panel = FollowPanel(simulation, adapter, runtime, routes.follow, receipt_label.setText)
+    follow_index = tabs.addTab(follow_panel, 'Follow · 虚拟手柄')
+    window.follow_panel = follow_panel
+    routes.on_follow_submit = follow_panel.controller.record_accepted
+    runtime.before_step, runtime.after_step = follow_panel.before_step, follow_panel.after_step
+    runtime.on_fault, runtime.on_reset = follow_panel.fault, follow_panel.reset
+    follow_panel.on_prepared = window.render_timer.start
     from .elite_gripper import make_gripper_panel
     gripper_panel = make_gripper_panel(inputs, adapter.grippers,
         {side: getattr(window, side + '_joints').widget.layout() for side in simulation.arms},
         ik_layouts={side: getattr(window, side + '_pose').widget.layout() for side in simulation.arms},
-        on_submit=view.follow_live if view else None)
+        on_submit=view.follow_live if view else None,
+        follow_layouts=follow_panel.gripper_layouts, follow_inputs=follow_panel.manual_inputs)
     window.gripper_panel = gripper_panel
     window.ik_gripper_panel = gripper_panel.ik
+    window.follow_gripper_panel = gripper_panel.follow
+    def select_input(index):
+        selected = index == follow_index
+        routes.select('follow' if selected else 'qt')
+        follow_panel.set_active(selected)
+        gripper_panel.refresh()
+        receipt_label.setText(f'Input owner: {session.active_source}; switching pages retains the last SDK target.')
+    tabs.currentChanged.connect(select_input)
     original_sync = window._sync_from_q
 
     def sync():
@@ -482,6 +521,7 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
 
     def display(samples):
         gripper_panel.refresh()
+        follow_panel.refresh(samples)
         # Only observations update these controls; set_q blocks widget signals.
         window._syncing = True
         try:
@@ -529,7 +569,8 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
     window.session, window.runtime, window.receipt_status = session, runtime, receipt_label
     def close(event):
         window.render_timer.stop()
-        inputs.close()
+        follow_panel.set_active(False)
+        routes.close()
         if view and not view.close(timeout=1.):
             receipt_label.setText('Rerun close timed out; display thread is still draining (control stopped).')
         event.accept()
