@@ -1,5 +1,6 @@
 """Offline hand input and deterministic command replay, independent of Qt/SDKs."""
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 import json
 from pathlib import Path
 
@@ -37,8 +38,11 @@ class QtInputRoutes:
     def select(self, mode):
         if mode not in ('qt', 'follow'):
             raise ValueError('Unknown Qt input mode')
-        if mode != self.mode and self.lease.active:
-            self.lease = self.session.activate(mode, replace=True)
+        if mode != self.mode:
+            try:
+                self.lease = self.lease.transfer(mode)
+            except InputOwnershipError:
+                pass  # An external source keeps ownership even if it raced the page change.
         self.mode = mode
 
     def close(self):
@@ -61,6 +65,14 @@ class _Route:
         if self.mode == 'follow' and self.routes.on_follow_submit:
             self.routes.on_follow_submit(receipt)
         return receipt
+
+    @contextmanager
+    def guard(self):
+        lease = self.routes.lease
+        with lease.guard():
+            if self.routes.mode != self.mode or lease.source != self.mode:
+                raise InputOwnershipError(f'{self.mode} input is inactive')
+            yield
 
 
 def command_data(command):
@@ -89,6 +101,7 @@ class FollowTrace:
     samples: list = field(default_factory=list)
     duration_steps: int = 0
     end_reason: str = 'recording'
+    failure: dict | None = None
 
     MAX_STEPS = 30_000
     MAX_COMMANDS = 30_000
@@ -137,6 +150,14 @@ class FollowTrace:
                 raise ValueError('Invalid hand snapshot')
             for pose in entry['hands'].values():
                 transform(pose)
+        if self.failure is not None:
+            step = self.failure['step']
+            if type(step) is not int or not 0 <= step < self.duration_steps:
+                raise ValueError('Failed native attempt must be inside the recording')
+            if self.failure['phase'] not in ('input', 'native', 'feedback'):
+                raise ValueError('Invalid failure phase')
+        elif self.end_reason.startswith('simulation fault:'):
+            raise ValueError('Fault recording lacks the failed attempt index')
         # Feedback is diagnostic data, never a source of replay commands.
         json.dumps(vars(self), allow_nan=False)
 
@@ -242,9 +263,6 @@ class FollowInput:
                 self.hands = {s: transform(p).copy() for s, p in row['hands'].items()}
                 self.inputs.submit(command_from_data(row['command']))
                 self.play_index += 1
-            if self.step_index >= trace.duration_steps:
-                self.stop_playback('completed')
-                self.message = '回放结束；保留最后目标，仿真继续运行'
             return
         for side in self.anchors:
             if np.any(self.angular_rates[side]):
@@ -260,6 +278,9 @@ class FollowInput:
         if capture and feedback is not None:
             capture.samples.append(dict(step=self.step_index, **feedback))
         self.step_index += 1
+        if self.playback and self.step_index >= self.playback.duration_steps:
+            self.stop_playback('completed')
+            self.message = '回放结束；保留最后目标，仿真继续运行'
         if self.recording and self.step_index >= FollowTrace.MAX_STEPS:
             self.stop_recording('recording limit reached')
             self.message = '录制达到长度上限；跟随仍在运行'
@@ -269,9 +290,8 @@ class FollowInput:
         if capture:
             capture.commands.append(dict(step=self.step_index, command=command_data(receipt.command),
                 hands={s: p.tolist() for s, p in self.hands.items()}))
-            if len(capture.commands) >= FollowTrace.MAX_COMMANDS:
+            if self.recording and len(capture.commands) >= FollowTrace.MAX_COMMANDS:
                 self.stop_recording('command limit reached')
-                self.stop_playback('command limit reached')
 
     def start_recording(self, metadata, initial_q):
         if not self.active:
@@ -284,9 +304,13 @@ class FollowInput:
     def stop_recording(self, reason='stopped'):
         if self.recording:
             trace = self.recording
-            trace.duration_steps = max(self.step_index, max((r['step'] + 1 for r in trace.commands), default=0))
-            trace.end_reason = reason
+            self._finish_trace(trace, reason)
             self.recording = None
+
+    def _finish_trace(self, trace, reason):
+        trace.duration_steps = max(self.step_index, max((r['step'] + 1 for r in trace.commands), default=0),
+                                   trace.failure['step'] + 1 if trace.failure else 0)
+        trace.end_reason = reason
 
     def start_playback(self, trace, *, metadata=None):
         if not self.active:
@@ -301,22 +325,26 @@ class FollowInput:
                                 dict(trace.initial_hands), trace.period)
         self.play_capture = self.trace
         self.message = '按原始控制周期回放；结束后保留最后目标'
+        if trace.duration_steps == 0:
+            self.stop_playback('completed')
 
     def stop_playback(self, reason='stopped'):
         was_playing = self.playback is not None or self.play_capture is not None
         if self.play_capture:
             trace = self.play_capture
-            trace.duration_steps = max(self.step_index, max((r['step'] + 1 for r in trace.commands), default=0))
-            trace.end_reason = reason
+            self._finish_trace(trace, reason)
             self.play_capture = None
         self.playback = None
         self.targets.clear()
         if was_playing:
             self.message = '回放已停止提交；SDK 保留最后目标'
 
-    def fault(self, error):
+    def fault(self, error, *, phase='native'):
         self.paused = str(error)
         self.clear_gestures()
+        capture = self.recording or self.play_capture
+        if capture:
+            capture.failure = dict(step=self.step_index, phase=phase, error=str(error))
         self.stop_playback('simulation fault: ' + str(error))
         self.stop_recording('simulation fault: ' + str(error))
         self.message = '仿真已暂停：' + str(error)

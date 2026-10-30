@@ -31,7 +31,7 @@ class ManualFollowInput:
         return self.panel.inputs.submit(command)
 
 
-def build_info(simulation):
+def build_info(simulation, grippers):
     import libpyelite
     from libpyelite.control_profile import describe_config
     native = Path(libpyelite._native.__file__)
@@ -41,19 +41,25 @@ def build_info(simulation):
         path = Path(configs[side].pop('model_path'))
         configs[side]['model_sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
     environment = dict(configs=configs, home_q=simulation.home_q.tolist(),
+        world_from_base={s: simulation.assembly.world_from_base(s).tolist() for s in simulation.arms},
         station_urdf_sha256=hashlib.sha256(simulation.urdf_path.read_bytes()).hexdigest(),
-        collision_profile=simulation.collision.profile if simulation.collision else None)
+        collision_profile=simulation.collision.profile if simulation.collision else None,
+        grippers=dict(policy='rate-limited-segment-preflight-v1', home=dict(grippers.home),
+            drivers=dict(grippers.drivers), calibration={s: knots.tolist() for s, knots in grippers.knots.items()},
+            velocities=dict(grippers.velocities), mimics={n: list(v) for n, v in grippers.mimics.items()}))
     signature = hashlib.sha256(json.dumps(environment, sort_keys=True, allow_nan=False).encode()).hexdigest()
     return dict(native_path=str(native), native_sha256=hashlib.sha256(native.read_bytes()).hexdigest(),
                 sdk_version=libpyelite.__version__, environment=environment, environment_sha256=signature,
                 scope='offline ideal plant; viewer grippers use collision preflight')
 
 
-def feedback(simulation, samples):
+def feedback(simulation, samples, grippers):
     def number(value):
         return float(value) if np.isfinite(value) else None
     return dict(q=simulation.q.tolist(), tcp={s: p.tolist() for s, p in simulation.tcp_poses().items()},
         reference_q={s: list(a.planner.reference()) for s, a in simulation.arms.items()},
+        grippers=dict(positions=dict(grippers.positions), targets=dict(grippers.targets),
+                      openings={s: grippers.opening(s) for s in grippers.drivers}, blocked=bool(grippers.blocked)),
         collision={s: dict(held=bool(v.get('collision_hold', False)), limited=bool(v.get('collision_limited', False)),
                           distance_m=number(v.get('collision_distance_m', float('inf')))) for s, v in samples.items()})
 
@@ -243,7 +249,8 @@ class FollowPanel(QWidget):
         self.sim, self.adapter, self.runtime = simulation, adapter, runtime
         self.inputs, self.report = inputs, report
         self.on_prepared = None
-        self.metadata = build_info(simulation)
+        self.failure_phase = 'native'
+        self.metadata = build_info(simulation, adapter.grippers)
         self.controller = FollowInput(inputs, lambda s: simulation.tcp_poses()[s],
                                       period=next(iter(simulation.arms.values())).config.period)
         self.manual_inputs = ManualFollowInput(self)
@@ -326,12 +333,17 @@ class FollowPanel(QWidget):
 
     def set_active(self, active):
         for pad in self.pads.values(): pad.release_input()
+        self.hold_metrics.clear()
         self.controller.set_enabled(active)
         self.refresh({})
 
     def prepare(self, initial_q):
-        if not self.inputs.active:
-            raise ValueError('Follow 没有输入权')
+        # The validation and reset are one owned action; an external policy
+        # cannot acquire input between the lease check and the state change.
+        with self.inputs.guard():
+            self._prepare(initial_q)
+
+    def _prepare(self, initial_q):
         q = np.asarray(initial_q, dtype=float)
         if q.shape != (12,) or not np.isfinite(q).all():
             raise ValueError('Invalid initial joints')
@@ -420,13 +432,16 @@ class FollowPanel(QWidget):
         self.repro_button.setEnabled(self.inputs.active)
 
     def before_step(self):
+        self.failure_phase = 'input'
         self.controller.before_step()
+        self.failure_phase = 'native'
 
     def after_step(self, samples):
+        self.failure_phase = 'feedback'
         capture = self.controller.recording or self.controller.play_capture
-        self.controller.after_step(feedback(self.sim, samples) if capture else None)
+        observed = feedback(self.sim, samples, self.adapter.grippers) if capture else None
         if self.controller.enabled:
-            now = self.controller.step_index * self.controller.period
+            now = (self.controller.step_index + 1) * self.controller.period
             for side, target in self.sim.targets().items():
                 previous = self.hold_metrics.get(side)
                 actual = self.sim.tcp_poses()[side][:3, 3]
@@ -438,9 +453,11 @@ class FollowPanel(QWidget):
                     if previous['anchor'] is None:
                         previous['anchor'] = actual.copy()
                     previous['drift'] = max(previous['drift'], float(np.linalg.norm(actual-previous['anchor'])))
+        # Only complete a captured attempt after all feedback collection succeeds.
+        self.controller.after_step(observed)
 
     def fault(self, error):
-        self.controller.fault(error)
+        self.controller.fault(error, phase=self.failure_phase)
         self.refresh({})
 
     def reset(self):

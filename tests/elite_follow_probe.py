@@ -67,6 +67,7 @@ def main(directory):
     assert len(accepted) == count
     assert 'rejected' in window.receipt_status.text()
     tabs.setCurrentIndex(0)
+    assert panel.hold_metrics == {}
     assert window.session.active_source == 'qt' and not panel.controller.active
     window.left_pose.controls['x'].spin.setValue(window.left_pose.controls['x'].value()+.001)
     assert len(accepted) == count + 1
@@ -87,12 +88,17 @@ def main(directory):
     loaded = FollowTrace.load(directory / 'follow-input.json')
     assert len(trace.samples) == 250
     original_q = np.array([s['q'] for s in trace.samples])
+    finger = panel.adapter.grippers.drivers['left']
+    finger_positions = [s['grippers']['positions'][finger] for s in trace.samples]
+    assert min(finger_positions) < max(finger_positions)
+    assert all('targets' in s['grippers'] and 'blocked' in s['grippers'] for s in trace.samples)
     panel.play(loaded); window.render_timer.stop()
     window.advance(loaded.duration_steps + 1)
     assert panel.controller.playback is None
     replay = panel.controller.trace
     np.testing.assert_allclose(np.array([s['q'] for s in replay.samples]), original_q, atol=1e-10)
     assert replay.commands == loaded.commands
+    assert [s['grippers'] for s in replay.samples] == [s['grippers'] for s in loaded.samples]
     replay.save(directory / 'follow-replayed.json')
     # Incompatible metadata and malformed commands are rejected before reset.
     incompatible = copy.deepcopy(loaded)
@@ -106,6 +112,18 @@ def main(directory):
     compatible = copy.deepcopy(loaded)
     compatible.metadata['native_sha256'] = 'other-build'
     panel.play(compatible); window.render_timer.stop(); window.advance(2); panel.stop()
+    # A feedback callback failure retains the failing attempt index as well.
+    panel.start_recording(); window.render_timer.stop()
+    original_targets = sim.targets
+    def broken_feedback():
+        sim.targets = original_targets
+        raise RuntimeError('injected feedback failure')
+    sim.targets = broken_feedback
+    window.advance(1)
+    assert panel.controller.trace.failure['phase'] == 'feedback'
+    assert panel.controller.trace.failure['step'] == 0
+    assert panel.controller.trace.duration_steps == 1
+    assert panel.controller.trace.end_reason.startswith('simulation fault:')
     # The built-in scenario feeds the same native path as direct SDK commands.
     panel.reproduce(); window.render_timer.stop()
     scenario = panel.loaded_trace

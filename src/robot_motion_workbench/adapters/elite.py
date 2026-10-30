@@ -416,6 +416,7 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
         view.start_display()
     session = RobotSession(adapter)
     from ..follow import QtInputRoutes
+    from ..control import InputOwnershipError
     routes = QtInputRoutes(session)
     inputs = routes.legacy
     runtime = EliteSandboxRuntime(adapter, view)
@@ -433,16 +434,20 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
             return inputs.submit(TcpTarget(side, pose))
 
         def reset(self, q, side='both'):
-            if not routes.lease.active:
-                raise ValueError('Qt input ownership is inactive')
-            adapter.reset(q, side)
-            if follow_panel:
-                follow_panel.reset()
+            try:
+                with routes.lease.guard():
+                    adapter.reset(q, side)
+                    if follow_panel:
+                        follow_panel.reset()
+            except InputOwnershipError as exc:
+                raise ValueError('Qt input ownership is inactive') from exc
 
         def reset_to_home(self):
-            if not routes.lease.active:
-                raise ValueError('Qt input ownership is inactive')
-            runtime.reset_to_home()
+            try:
+                with routes.lease.guard():
+                    runtime.reset_to_home()
+            except InputOwnershipError as exc:
+                raise ValueError('Qt input ownership is inactive') from exc
 
     class ViewerFacade:
         url = 'Rerun native viewer'

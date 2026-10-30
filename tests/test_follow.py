@@ -158,6 +158,52 @@ def test_fault_or_external_takeover_stops_follow_submission_and_capture():
     assert follow.trace.end_reason == 'input ownership lost'
 
 
+def test_fault_without_new_submission_is_included_and_never_replayed_as_completed():
+    original, _, _ = engine()
+    original.start_recording({}, [0.] * 12)
+    original.begin_grip('left')
+    steps(original, 5)
+    original.before_step()  # No target at tick 5; next 30 Hz submission is tick 9.
+    original.fault('injected native fault', phase='native')
+    source = original.trace
+    assert source.duration_steps == 6
+    assert source.failure == dict(step=5, phase='native', error='injected native fault')
+    source.validate()
+    replay, _, _ = engine()
+    replay.start_playback(source)
+    steps(replay, 5)
+    replay.before_step()
+    assert replay.play_capture is not None
+    replay.fault('injected native fault', phase='native')
+    assert replay.trace.end_reason.startswith('simulation fault:')
+    assert replay.trace.failure['step'] == 5
+    assert replay.trace.duration_steps == 6
+    # A fixed SDK completing that sixth attempt may legitimately report success.
+    fixed, _, _ = engine()
+    fixed.start_playback(source)
+    steps(fixed, 6)
+    assert fixed.playback is None
+    assert fixed.trace.end_reason == 'completed'
+    assert fixed.trace.failure is None and len(fixed.trace.samples) == 6
+
+
+def test_playback_at_command_limit_still_captures_its_last_native_step(monkeypatch):
+    original, _, _ = engine()
+    original.start_recording({}, [0.] * 12)
+    original.begin_grip('left')
+    steps(original, 10)  # Commands at 0 and 9, two complete native attempts at their timestamps.
+    original.stop_recording()
+    trace = original.trace
+    assert len(trace.commands) == 2
+    monkeypatch.setattr(FollowTrace, 'MAX_COMMANDS', 2)
+    replay, _, _ = engine()
+    replay.start_playback(trace)
+    steps(replay, trace.duration_steps)
+    assert replay.trace.end_reason == 'completed'
+    assert len(replay.trace.samples) == 10
+    assert replay.trace.commands == trace.commands
+
+
 def test_routes_switch_only_their_own_lease(robot_urdf):
     from test_control import FakeSevenAxis
     from robot_motion_workbench import RobotSession
@@ -177,3 +223,39 @@ def test_routes_switch_only_their_own_lease(robot_urdf):
     assert not routes.follow.active and not routes.legacy.active
     routes.close()
     assert session.active_source == 'policy'
+
+
+def test_page_change_cannot_steal_policy_during_transfer(robot_urdf):
+    from threading import Event, Thread
+    from test_control import FakeSevenAxis
+    from robot_motion_workbench import RobotSession
+    session = RobotSession(FakeSevenAxis(robot_urdf).adapter)
+    routes = QtInputRoutes(session)
+    entered = Event()
+    original = session._transfer
+    def transfer(lease, source):
+        entered.set()
+        return original(lease, source)
+    session._transfer = transfer
+    # The page change has begun, but cannot obtain the session lock yet.
+    with session._lock:
+        thread = Thread(target=lambda: routes.select('follow'))
+        thread.start()
+        assert entered.wait(1)
+        policy = session.activate('policy', replace=True)
+    thread.join(1)
+    assert not thread.is_alive()
+    assert policy.active and session.active_source == 'policy'
+    assert not routes.follow.active
+
+
+def test_stale_lease_cannot_execute_reset_action(robot_urdf):
+    from test_control import FakeSevenAxis
+    from robot_motion_workbench import RobotSession
+    session = RobotSession(FakeSevenAxis(robot_urdf).adapter)
+    routes = QtInputRoutes(session)
+    session.activate('policy', replace=True)
+    actions = []
+    with pytest.raises(InputOwnershipError):
+        with routes.legacy.guard(): actions.append('reset')
+    assert actions == []
