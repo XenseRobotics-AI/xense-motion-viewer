@@ -4,6 +4,7 @@ Commands use SI units. A successful submission only says the adapter accepted
 the target; it says nothing about a hardware send, execution or achievement.
 """
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from threading import RLock
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol
@@ -206,6 +207,16 @@ class RobotSession:
     def _is_active(self, producer):
         return self._source == producer.source and self._generation == producer._generation
 
+    def _transfer(self, producer, source):
+        """Replace only this still-active lease, atomically with the check."""
+        name(source)
+        with self._lock:
+            if producer._controller is not self or not self._is_active(producer):
+                raise InputOwnershipError('Input session was replaced before transfer')
+            self._generation += 1
+            self._source = source
+            return InputSession(self, source, self._generation)
+
     def _submit(self, producer, command):
         with self._lock:
             if not self._is_active(producer):
@@ -234,6 +245,18 @@ class InputSession:
 
     def submit(self, command: Command) -> SubmissionReceipt:
         return self._controller._submit(self, command)
+
+    def transfer(self, source: str):
+        """Transfer this lease without stealing an intervening producer's input."""
+        return self._controller._transfer(self, source)
+
+    @contextmanager
+    def guard(self):
+        """Serialize an explicit lifecycle action with input takeover/submission."""
+        with self._controller._lock:
+            if not self._controller._is_active(self):
+                raise InputOwnershipError('Input session is inactive')
+            yield self
 
     def close(self):
         with self._controller._lock:

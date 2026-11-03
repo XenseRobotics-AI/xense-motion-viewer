@@ -43,6 +43,8 @@ def test_live_futures_progress_replace_and_measured_history(tmp_path, robot_urdf
     renderer.close()
     chunks = list(RrdReader(path).stream())
     root = renderer.root
+    robot_root = renderer.robot.instance_path('live')
+    assert not rows(chunks, f'{robot_root}/tcp/left', 'Points3D:positions')
     points = rows(chunks, f'{root}/future/left/steps', 'Points3D:positions')
     assert len(points) == 2  # Coordinates only on arrival/replacement.
     np.testing.assert_allclose(points[0], [[1, 0, 0], [2, 0, 0], [3, 0, 0]])

@@ -5,6 +5,7 @@ import sys
 
 import numpy as np
 import pytest
+from rrd_reader import RrdReader
 
 pytest.importorskip('libpyelite')
 from libpyelite.sim import StationSimulation
@@ -68,4 +69,9 @@ def test_qt_entry_offscreen(tmp_path):
                                       'ik_gripper_input_checked',
                                       'collision_toggle_checked','reset_checked'])
     assert path.stat().st_size > 1000
+    marker_paths = {chunk.entity_path for chunk in RrdReader(path).stream()
+                    if 'Points3D:positions' in chunk.to_record_batch().schema.names}
+    for side in ('left', 'right'):
+        for group in ('tcp', 'targets'):
+            assert f'/world/robots/elite_station/{group}/{side}' in marker_paths
     subprocess.run([sys.executable, '-m', 'rerun', 'rrd', 'verify', str(path)], check=True, capture_output=True)
