@@ -1,4 +1,4 @@
-# Xense Motion Viewer
+# xense-motion-viewer
 
 机器人运动工作台，支持真实 policy/SDK 状态的只读显示，以及 Elite CS66 离线仿真和 Qt 控制。
 
@@ -27,7 +27,9 @@ python -m pip install /path/to/libpyelite-0.1.0-cp312-cp312-linux_x86_64.whl
 python -m pip install -e '.[elite,rerun,qt]'
 ```
 
-Rerun SDK 固定为 **0.26.2**，与 xense-openpi 的 lerobot 约束兼容，请使用同环境附带的 Viewer。已有环境只需激活 `.venv`；更新本项目源码后的入口可用 `python -m pip install --no-deps -e .` 刷新。
+Qt 仿真、离线 Policy 和在线显示统一使用 **Rerun SDK 0.26.2**，与 xense-openpi 的 LeRobot 和 teleop 依赖保持一致。请使用同环境附带的 Viewer。
+
+从旧包名升级时，先执行 `python -m pip uninstall robot-motion-workbench`，再执行上面的安装命令。安装包名为 `xense-motion-viewer`，Python 导入名为 `xense_motion_viewer`，命令前缀为 `xmv-*`。已有环境也需要重新执行安装命令，以更新 Rerun 依赖和入口。
 
 ## 快速开始
 
@@ -39,9 +41,9 @@ xmv-elite-qt --collision-profile auto
 xmv-elite-policy
 ```
 
-Qt 提交运动目标，由原生仿真按速度、加速度与碰撞约束推进。Joint / IK 页的夹爪输入同步，0% 为闭合、100% 为张开，实际开度单独显示。碰撞包络开关只改变显示；`--collision-profile off` 才会关闭碰撞检查。
+Qt 提交运动目标，由原生仿真按速度、加速度与碰撞约束推进。Joint / IK / Follow 页的夹爪输入同步，0% 为闭合、100% 为张开，实际开度单独显示。碰撞包络开关只改变显示；`--collision-profile off` 才会关闭碰撞检查。
 
-**Follow · 虚拟手柄** 页提供左右臂独立输入球。左键拖动位置，滚轮调整第三轴，右键拖动旋转；按住 Q/E 可在平移时同时旋转。球代表输入设备，不附着在末端，反馈不会把它拉回。松手保留最后目标，重新抓取时从当前仿真 TCP 建立相对基准。FK/IK 与 Follow 的输入互斥，切页本身不取消 SDK 已接受的目标。
+**Follow · 虚拟手柄** 仅用于 Qt 离线仿真，提供左右臂独立输入球。左键拖动位置，滚轮调整第三轴，右键拖动旋转；按住 Q/E 可在平移时同时旋转。球代表输入设备，不附着在末端，反馈不会把它拉回。松手保留最后目标，重新抓取时从当前仿真 TCP 建立相对基准。FK/IK 与 Follow 的输入互斥，切页本身不取消 SDK 已接受的目标。
 
 Follow 支持从 home 录制、JSON 输入与逐周期反馈保存、按原始控制周期回放，以及 diagonal-08 的“下压＋旋转＋保持＋撤回”离线场景。Rerun 用橙色球显示目标、绿色点显示仿真 TCP。页面显示实际加载的 native `.so` 路径和 SHA256；同为 `libpyelite==0.1.0` 不代表同一构建。详见 [Follow 操作与对照测试](docs/follow.md)。
 

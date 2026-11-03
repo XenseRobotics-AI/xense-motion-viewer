@@ -1,7 +1,8 @@
 # 真实 Policy 与机器人状态显示
 
-XMV 的在线入口只消费数据，不需要控制会话，也不会调用 IK、推进仿真或发送机器人命令。
+xense-motion-viewer 的在线入口只消费数据，不需要控制会话，也不会调用 IK、推进仿真或发送机器人命令。
 原来的 `xmv-elite-policy` 和 Qt 离线工具保留。
+Follow 虚拟手柄与离线目标标记仅用于 Qt 仿真，在线入口不启用它们。
 
 ## 数据入口
 
@@ -24,12 +25,12 @@ policy 世界坐标、安装变换与工具变换。`poses_from_xyz_rotation6d()
 
 ## Rerun 版本与显示线程
 
-当前分支固定 Rerun 0.26.2，适配 xense-openpi 的 lerobot 版本约束。显示与推理共用 Python
+所有入口统一固定 Rerun 0.26.2，适配 xense-openpi 的 LeRobot 和 teleop 依赖。显示与推理共用 Python
 环境，状态采样和渲染各自运行在独立线程中；渲染线程只接收状态和参考的副本。
 0.26 使用实体树解析坐标关系：网格放在对应连杆实体下面，连杆由世界位姿更新；碰撞包络与
-TCP 标记也使用世界位姿。新版命名坐标系 API 不作为 0.26 正确显示的前提。
-0.26 的相机取景和时间跟随由 Viewer 控制；新版 SDK 的相机初始位姿与播放状态 RPC 不在
-该版本的 Python API 中。打开/重连 Viewer 不会替换已有录制文件的输出。
+TCP 标记也使用世界位姿。
+相机取景和时间跟随由 Viewer 控制，该版本的 Python API 不提供相机初始位姿与播放状态 RPC。
+打开或重连 Viewer 不会替换已有录制文件的输出。
 
 ```python
 from xense_motion_viewer.live import LiveFrame, FutureTrajectory

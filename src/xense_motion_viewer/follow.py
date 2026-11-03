@@ -108,7 +108,7 @@ class FollowTrace:
 
     def save(self, path):
         self.validate()
-        document = dict(schema='rmw-follow-v1', **vars(self))
+        document = dict(schema='xmv-follow-v1', **vars(self))
         Path(path).write_text(json.dumps(document, ensure_ascii=False, allow_nan=False))
 
     @classmethod
@@ -117,7 +117,7 @@ class FollowTrace:
         if path.stat().st_size > 64 * 1024 * 1024:
             raise ValueError('Follow recording exceeds 64 MiB')
         data = json.loads(path.read_text())
-        if data.pop('schema', None) != 'rmw-follow-v1':
+        if data.pop('schema', None) != 'xmv-follow-v1':
             raise ValueError('Unsupported Follow recording schema')
         trace = cls(**data)
         trace.validate()
