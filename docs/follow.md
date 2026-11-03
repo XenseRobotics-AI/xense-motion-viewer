@@ -1,6 +1,6 @@
 # Follow：独立虚拟手柄
 
-启动 `rmw-elite-qt --collision-profile auto`，选择 FK、IK 后面的 **Follow · 虚拟手柄** 页。该功能只运行离线仿真，不创建真机驱动或连接机器人。
+启动 `xmv-elite-qt --collision-profile auto`，选择 FK、IK 后面的 **Follow · 虚拟手柄** 页。该功能只运行离线仿真，不创建真机驱动或连接机器人。
 
 ## 操作
 

@@ -5,9 +5,9 @@ import pytest
 
 pytest.importorskip('libpyelite')
 from libpyelite.sim import StationSimulation
-from robot_motion_workbench import RobotSession
-from robot_motion_workbench.adapters.elite import EliteStationAdapter
-from robot_motion_workbench.urdf import URDFModel
+from xense_motion_viewer import RobotSession
+from xense_motion_viewer.adapters.elite import EliteStationAdapter
+from xense_motion_viewer.urdf import URDFModel
 
 pytestmark = pytest.mark.elite
 

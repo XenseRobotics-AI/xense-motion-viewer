@@ -1,13 +1,16 @@
-# Robot Motion Workbench
+# Xense Motion Viewer
 
-Elite CS66 双臂离线运动工作台，使用原生 `libpyelite` 仿真、Qt 输入面板和 Rerun 可视化。
+机器人运动工作台，支持真实 policy/SDK 状态的只读显示，以及 Elite CS66 离线仿真和 Qt 控制。
 
-当前维护两条使用路径：
+当前维护以下使用路径：
 
 - **Elite + Qt**：交互设置双臂关节、TCP 位姿与夹爪开度，查看仿真运动和碰撞包络。
 - **Elite + Policy**：播放采集动作或手写参考，在同一 3D 视图中对比目标与仿真反馈。
+- **真实 Policy + SDK 状态**：接收未来 TCP 参考与真实关节/TCP 状态，显示机器人、已走轨迹与当前点。
+  通过公共只读接口接入，详见 [在线显示接口](docs/live.md)。
 
-支持 `diagonal-07`、`diagonal-08` 两种站点，以及 RRD 录制、回放和 Viewer 重连。运动规划、IK 与碰撞检查由 SDK 负责；当前不连接真机，不运行 VLA 推理。
+Elite 离线工具支持 `diagonal-07`、`diagonal-08` 两种站点，以及 RRD 录制、回放和 Viewer 重连。
+在线显示由宿主提供真机数据；机器人控制、SDK 连接和 VLA 推理均由宿主管理。
 
 ## 安装
 
@@ -24,16 +27,16 @@ python -m pip install /path/to/libpyelite-0.1.0-cp312-cp312-linux_x86_64.whl
 python -m pip install -e '.[elite,rerun,qt]'
 ```
 
-Rerun SDK 固定为 **0.38.1**，请使用同环境附带的 Viewer。已有环境只需激活 `.venv`；更新本项目源码后的入口可用 `python -m pip install --no-deps -e .` 刷新。
+Rerun SDK 固定为 **0.26.2**，与 xense-openpi 的 lerobot 约束兼容，请使用同环境附带的 Viewer。已有环境只需激活 `.venv`；更新本项目源码后的入口可用 `python -m pip install --no-deps -e .` 刷新。
 
 ## 快速开始
 
 ```sh
 # Qt 交互面板与实时 Rerun Viewer
-rmw-elite-qt --collision-profile auto
+xmv-elite-qt --collision-profile auto
 
 # 双臂策略参考与仿真反馈
-rmw-elite-policy
+xmv-elite-policy
 ```
 
 Qt 提交运动目标，由原生仿真按速度、加速度与碰撞约束推进。Joint / IK 页的夹爪输入同步，0% 为闭合、100% 为张开，实际开度单独显示。碰撞包络开关只改变显示；`--collision-profile off` 才会关闭碰撞检查。
@@ -60,11 +63,11 @@ Policy 默认播放包内 episode 0：4451 帧、30 Hz、约 148 秒，左右臂
 ## 录制与回放
 
 ```sh
-rmw-elite-qt --collision-profile auto --save recordings/elite-qt.rrd
-rmw-elite-policy --save recordings/elite-policy.rrd
+xmv-elite-qt --collision-profile auto --save recordings/elite-qt.rrd
+xmv-elite-policy --save recordings/elite-policy.rrd
 
 # 结束对应应用、完成写入后回放
-rmw-policy-replay recordings/elite-policy.rrd
+xmv-policy-replay recordings/elite-policy.rrd
 ```
 
 关闭 Viewer 不会停止仿真或录制；Qt 的“打开 Rerun”按钮可重连。Qt / Policy 默认 Viewer 端口为 9876 / 9877，可用 `--port` 修改。`--no-viewer` 禁用实时 Viewer，仍可录制。
@@ -72,11 +75,11 @@ rmw-policy-replay recordings/elite-policy.rrd
 无需界面的有限步数验证：
 
 ```sh
-rmw-elite-policy --no-viewer --fast --steps 320 --save recordings/smoke.rrd
+xmv-elite-policy --no-viewer --fast --steps 320 --save recordings/smoke.rrd
 python -m rerun rrd verify recordings/smoke.rrd
 ```
 
-`rmw-elite-record` 可单独录制原生仿真状态。录制采用显示采样，可能合并或丢弃显示帧，不是逐控制周期的完整记录；提交成功也不代表已发送或已到达。
+`xmv-elite-record` 可单独录制原生仿真状态。录制采用显示采样，可能合并或丢弃显示帧，不是逐控制周期的完整记录；提交成功也不代表已发送或已到达。
 
 ## 开发与文档
 

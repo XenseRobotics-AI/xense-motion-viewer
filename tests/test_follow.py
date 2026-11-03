@@ -4,8 +4,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from robot_motion_workbench import InputOwnershipError, JointTarget, TcpTarget
-from robot_motion_workbench.follow import FollowInput, FollowTrace, QtInputRoutes, command_data, rotation_vector
+from xense_motion_viewer import InputOwnershipError, JointTarget, TcpTarget
+from xense_motion_viewer.follow import FollowInput, FollowTrace, QtInputRoutes, command_data, rotation_vector
 
 
 class Input:
@@ -206,7 +206,7 @@ def test_playback_at_command_limit_still_captures_its_last_native_step(monkeypat
 
 def test_routes_switch_only_their_own_lease(robot_urdf):
     from test_control import FakeSevenAxis
-    from robot_motion_workbench import RobotSession
+    from xense_motion_viewer import RobotSession
     sdk = FakeSevenAxis(robot_urdf)
     session = RobotSession(sdk.adapter)
     routes = QtInputRoutes(session)
@@ -228,7 +228,7 @@ def test_routes_switch_only_their_own_lease(robot_urdf):
 def test_page_change_cannot_steal_policy_during_transfer(robot_urdf):
     from threading import Event, Thread
     from test_control import FakeSevenAxis
-    from robot_motion_workbench import RobotSession
+    from xense_motion_viewer import RobotSession
     session = RobotSession(FakeSevenAxis(robot_urdf).adapter)
     routes = QtInputRoutes(session)
     entered = Event()
@@ -251,7 +251,7 @@ def test_page_change_cannot_steal_policy_during_transfer(robot_urdf):
 
 def test_stale_lease_cannot_execute_reset_action(robot_urdf):
     from test_control import FakeSevenAxis
-    from robot_motion_workbench import RobotSession
+    from xense_motion_viewer import RobotSession
     session = RobotSession(FakeSevenAxis(robot_urdf).adapter)
     routes = QtInputRoutes(session)
     session.activate('policy', replace=True)

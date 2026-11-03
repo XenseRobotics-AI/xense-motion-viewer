@@ -16,8 +16,8 @@ Qt 与 Policy 共用 `RobotSession` 和目标提交接口；原生 SDK 负责 IK
 
 ```python
 from libpyelite.sim import StationSimulation
-from robot_motion_workbench import RobotSession, TcpTarget
-from robot_motion_workbench.adapters.elite import EliteStationAdapter
+from xense_motion_viewer import RobotSession, TcpTarget
+from xense_motion_viewer.adapters.elite import EliteStationAdapter
 
 simulation = StationSimulation('diagonal-08', collision_profile='auto')
 adapter = EliteStationAdapter(simulation)
@@ -46,7 +46,7 @@ inputs.close()
 显式接管后，旧 Qt 输入无法提交或重置机器人；关闭旧输入也不会释放新输入的所有权。
 释放输入权不等于取消 SDK 已接受的目标。
 
-`rmw-elite-qt` 复用 SDK 的 Joint / IK 面板，输入通过会话转发。
+`xmv-elite-qt` 复用 SDK 的 Joint / IK 面板，输入通过会话转发。
 两页夹爪目标同步；观察刷新不会再次提交目标。夹爪输入还会让 Viewer 返回当前仿真时间。
 
 SDK 调用在宿主线程执行。`EliteSandboxRuntime.poll()` 沿用原生沙盒的有限追赶调度，

@@ -13,8 +13,8 @@ def test_environment_identity_includes_gripper_geometry_and_motion(change):
     pytest.importorskip('libpyelite')
     pytest.importorskip('PySide6')
     from libpyelite.sim import StationSimulation
-    from robot_motion_workbench.adapters.elite import EliteStationAdapter
-    from robot_motion_workbench.adapters.elite_follow import build_info
+    from xense_motion_viewer.adapters.elite import EliteStationAdapter
+    from xense_motion_viewer.adapters.elite_follow import build_info
     sim = StationSimulation(collision_profile='auto')
     adapter = EliteStationAdapter(sim)
     original = build_info(sim, adapter.grippers)

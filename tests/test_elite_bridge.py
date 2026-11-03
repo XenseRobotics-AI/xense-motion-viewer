@@ -5,11 +5,12 @@ import sys
 
 import numpy as np
 import pytest
+from rrd_reader import RrdReader
 
 pytest.importorskip('libpyelite')
 from libpyelite.sim import StationSimulation
-from robot_motion_workbench.adapters.elite import EliteStationAdapter
-from robot_motion_workbench.urdf import URDFModel
+from xense_motion_viewer.adapters.elite import EliteStationAdapter
+from xense_motion_viewer.urdf import URDFModel
 
 pytestmark = pytest.mark.elite
 
@@ -57,7 +58,7 @@ def test_production_pinocchio_link_tool_and_collision_parity(station):
 def test_qt_entry_offscreen(tmp_path):
     path = tmp_path/'qt.rrd'
     env = os.environ | {'QT_QPA_PLATFORM': 'offscreen'}
-    process = subprocess.run([sys.executable, '-m', 'robot_motion_workbench.adapters.elite',
+    process = subprocess.run([sys.executable, '-m', 'xense_motion_viewer.adapters.elite',
         '--no-viewer', '--no-show', '--display-hz', '60', '--save', str(path), '--collision-profile', 'auto'],
         env=env, text=True, capture_output=True, timeout=120)
     assert process.returncode == 0, process.stderr
@@ -68,4 +69,9 @@ def test_qt_entry_offscreen(tmp_path):
                                       'ik_gripper_input_checked',
                                       'collision_toggle_checked','reset_checked'])
     assert path.stat().st_size > 1000
+    marker_paths = {chunk.entity_path for chunk in RrdReader(path).stream()
+                    if 'Points3D:positions' in chunk.to_record_batch().schema.names}
+    for side in ('left', 'right'):
+        for group in ('tcp', 'targets'):
+            assert f'/world/robots/elite_station/{group}/{side}' in marker_paths
     subprocess.run([sys.executable, '-m', 'rerun', 'rrd', 'verify', str(path)], check=True, capture_output=True)

@@ -10,9 +10,9 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QComboBox, QTabWidget
 
-from robot_motion_workbench import TcpTarget
-from robot_motion_workbench.adapters.elite import make_qt_window
-from robot_motion_workbench.follow import FollowTrace
+from xense_motion_viewer import TcpTarget
+from xense_motion_viewer.adapters.elite import make_qt_window
+from xense_motion_viewer.follow import FollowTrace
 
 
 def main(directory):
