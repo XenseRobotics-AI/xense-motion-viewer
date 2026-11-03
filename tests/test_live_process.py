@@ -1,6 +1,8 @@
 import os
+import socket
 import subprocess
 import sys
+import threading
 import time
 from io import BytesIO
 
@@ -237,3 +239,49 @@ def test_close_with_busy_motion_transport_stops_and_can_be_repeated(robot_urdf, 
     assert display.close()
     assert not display.stats.alive
     assert display.stats.discarded_close >= 1
+
+
+def _display_without_window(*args):
+    import rerun as rr
+
+    from xense_motion_viewer.live_process import _display_main
+
+    rr.RecordingStream.spawn = lambda *args, **kwargs: None
+    _display_main(*args)
+
+
+def test_failed_sink_stops_child_and_feeder_without_explicit_close(robot_urdf, names, monkeypatch):
+    import xense_motion_viewer.live_process as module
+
+    listener = socket.socket()
+    listener.bind(('127.0.0.1', 0))
+    listener.listen()
+    listener.settimeout(.1)
+    release = threading.Event()
+
+    def unresponsive_peer():
+        while not release.is_set():
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                continue
+            with connection:
+                release.wait(10)
+            return
+
+    peer = threading.Thread(target=unresponsive_peer, daemon=True)
+    peer.start()
+    monkeypatch.setattr(module, '_display_main', _display_without_window)
+    display = None
+    try:
+        display = LiveDisplayProcess(RobotDescription('robot', robot_urdf, names),
+            config=ProcessDisplayConfig(viewer_port=listener.getsockname()[1], startup_timeout=3))
+        wait_for(lambda: display.stats.errors > 0, timeout=5)
+        wait_for(lambda: not display.stats.alive, timeout=3)
+        assert not display.publish(LiveFrame(5))
+    finally:
+        if display is not None:
+            display.close(timeout=.2)
+        release.set()
+        peer.join(2)
+        listener.close()

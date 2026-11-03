@@ -191,6 +191,9 @@ def _display_main(description, config, streams, channels, stop, ready, counters,
             ready.send((False, f'{type(exc).__name__}: {exc}'))
         except (BrokenPipeError, OSError):
             pass
+        # After a sink failure, disconnect and Rerun's atexit can wait forever.
+        # Exit only this isolated worker; its parent observes the failed process.
+        os._exit(1)
     finally:
         ready.close()
         if recording is not None:
@@ -266,6 +269,7 @@ class LiveDisplayProcess:
         return True
 
     def publish(self, frame, *, generation=0):
+        """Reject without waiting; callers must retry reset/absence boundaries."""
         if not self._enter():
             return False
         try:
@@ -378,7 +382,7 @@ class LiveDisplayProcess:
     def stats(self):
         failed = self._process.exitcode not in (None, 0)
         return DisplayStats(self._accepted, int(self._counters[0]), self._dropped, self._discarded,
-                            self._rejected, self._errors + int(self._counters[1]) + int(failed),
+                            self._rejected, self._errors + int(self._counters[1]) + int(failed and not self._counters[1]),
                             len(self._motion) + len(self._images) + self._in_flight + int(self._task is not None), self._closed,
                             self._process.is_alive() or self._feeder.is_alive(),
                             self._last_error or (f'Display process exited: {self._process.exitcode}' if failed else None),
