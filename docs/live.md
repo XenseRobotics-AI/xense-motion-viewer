@@ -1,77 +1,101 @@
-# 真实 Policy 与机器人状态显示
+# 真实 Policy、图像与机器人状态显示
 
-xense-motion-viewer 的在线入口只消费数据，不需要控制会话，也不会调用 IK、推进仿真或发送机器人命令。
-原来的 `xmv-elite-policy` 和 Qt 离线工具保留。
-Follow 虚拟手柄与离线目标标记仅用于 Qt 仿真，在线入口不启用它们。
+在线显示只消费宿主提供的数据。机器人控制、SDK 连接、相机采集和策略推理由宿主管理。
+原来的 Qt 与离线 Policy 工具保留。
 
-## 数据入口
+## 独立显示进程
 
-`xense_motion_viewer.live` 提供：
+`xense_motion_viewer.live_process.LiveDisplayProcess` 使用 `spawn` 启动子进程。
+Rerun 导入、RecordingStream、URDF 渲染、图像缩放和 JPEG 编码、日志与录制都在子进程中运行。
+宿主继续独立采样 SDK 状态，通过 `publish()` 提交不可变 `LiveFrame`；图像不改变这条状态来源。
 
-- `FutureTrajectory(step_ids, poses)`：某个 TCP 的剩余参考，位姿为世界坐标 `[N,4,4]`。
-  ID 在当前 episode 内唯一；动作消费移除前缀，替换/混合则更新有效参考。
-- `LiveFrame(time, futures, state, sample_id, reset, status)`：一个不可变显示快照。
-  `time` 是宿主单调经过时间，`state` 是 SDK 实测 `RobotState`；缺失状态传 `None`。
-  同一个 `sample_id` 不重复累积历史。`reset=True` 清空上一 episode 的参考和历史。
-- `LiveMotionDisplay(recording, description)`：同进程、有界异步渲染，渲染线程只接收不可变数据。
+`publish_images()` 只限频并保存最新图像引用。后台搬运线程完成序列化和复制，再写入固定容量的跨进程通道。
+每路图像保留最新待处理样本，运动数据保持有界 FIFO 和批处理，任务使用完整状态快照及最多 256 条事件。
+通道锁忙或运动队列满时丢弃显示数据，不等待显示消费。`stats` 提供错误、丢弃和进程存活状态。
+独立进程仍共享 CPU 和内存带宽，不能视为零性能开销。
 
-蓝色路径与点表示未来 TCP 参考。绿色路径与点来自实测 TCP；机器人各连杆由实测关节角和
-URDF 正运动学更新。未来参考从不用于生成实测历史。单个点的未来参考也可以显示。
-历史使用有界分段存储；数据缺失时保留旧线段并隐藏当前点，恢复后另起一段。
+发布的图像必须是 HWC、uint8、RGB。调用者交付后不得原地修改或复用数组存储。
+当前 Elite 腕部与 RECTIFY 驱动每次发布新的处理后 RGB 数组，符合这个约定；其他设备接入时必须重新确认。
+显示只处理副本，不会在原图上画标记或缩放。
 
-位姿使用米、右手坐标系和 `world_from_tcp` 方向；关节角使用弧度。宿主负责对齐 URDF、
-policy 世界坐标、安装变换与工具变换。`poses_from_xyz_rotation6d()` 将 `[N,9]` 的 XYZ 和
-旋转矩阵前两列转换为 `[N,4,4]`，进行正交化并拒绝退化姿态。
+图像默认 10 Hz、最长边 640 像素、JPEG 质量 85。默认每路传输槽上限 8 MiB，超限丢弃并计入错误。
+只有 `ImageStream` 中声明的图像才会显示。没有 Viewer 且没有录制输出的配置会被拒绝，避免写入无限缓冲。
+输出每秒执行有时限的 flush；输出阻塞超过限时会结束显示进程，宿主继续运行。此时录制也随显示结束，
+已写文件不再增加数据。重新开启显示需要新会话。
 
-## Rerun 版本与显示线程
+关闭会先限时排空搬运和显示通道，再退出子进程；超时可终止显示进程并返回 `False`。
+强制退出可能留下未完成的录制文件，必须检查返回值。显示关闭不关闭宿主的 SDK 或相机。
 
-所有入口统一固定 Rerun 0.26.2，适配 xense-openpi 的 LeRobot 和 teleop 依赖。显示与推理共用 Python
-环境，状态采样和渲染各自运行在独立线程中；渲染线程只接收状态和参考的副本。
-0.26 使用实体树解析坐标关系：网格放在对应连杆实体下面，连杆由世界位姿更新；碰撞包络与
-TCP 标记也使用世界位姿。
-相机取景和时间跟随由 Viewer 控制，该版本的 Python API 不提供相机初始位姿与播放状态 RPC。
-打开或重连 Viewer 不会替换已有录制文件的输出。
+## 数据和时间
+
+现有运动输入保持如下语义：
+
+- `FutureTrajectory(step_ids, poses)` 是剩余 TCP 参考，世界坐标位姿为 `[N,4,4]`。动作消费移除前缀，替换或混合更新有效参考。
+- `LiveFrame(time, futures, state, sample_id, reset, status)` 是不可变运动快照。缺少实测状态时传 `None`，重复 `sample_id` 不重复累积历史。
+- 蓝色轨迹表示未来参考；绿色路径和模型来自 SDK 实测 TCP 与关节角。提交动作不代表已到达。
+- `generation` 随 episode 递增。运动、图像和任务都携带它，迟到的旧轮数据被丢弃；不依赖一个可能丢失的 reset 消息清除旧画面。
+
+`clock_origin` 是宿主唯一的 `time.monotonic()` 起点。所有图像、状态和任务时间都减去这个起点，记录在 `host_elapsed`。
+图像时间是原观测的采样时刻，不是硬件曝光时间。观测流超过 `stale_after` 未更新时清空图像并标记过期；
+驱动不断返回旧缓存时无法据此判断单个传感器是否仍产生新帧。
+
+机器人位姿使用米、右手坐标系和 `world_from_tcp`，关节角使用弧度。宿主负责对齐 URDF、世界坐标和工具变换。
 
 ```python
-from xense_motion_viewer.live import LiveFrame, FutureTrajectory
-from xense_motion_viewer.live import LiveMotionDisplay
-import rerun as rr
+import time
+from xense_motion_viewer.live import LiveFrame
+from xense_motion_viewer.live_process import (
+    ImageStream, LiveDisplayProcess, ProcessDisplayConfig, TaskSnapshot,
+)
 
-recording = rr.RecordingStream("live")
-recording.save("recordings/live.rrd")
-display = LiveMotionDisplay(recording, description)
+# 包含 spawn 的应用入口需要 if __name__ == '__main__' 保护。
+origin = time.monotonic()
+display = LiveDisplayProcess(
+    description,
+    config=ProcessDisplayConfig(spawn_viewer=False, save_path='recordings/live.rrd'),
+    streams=(ImageStream('wrist', '腕部 RGB'),),
+    clock_origin=origin,
+)
 try:
-    display.publish(LiveFrame(
-        time=host_elapsed,
-        futures={"left": FutureTrajectory(action_ids, world_from_tcp_poses)},
-        state=measured_state,
-        sample_id=sdk_sample_id,
-    ))
+    at = time.monotonic() - origin
+    display.publish(LiveFrame(at, state=measured_state, sample_id=sdk_sample_id), generation=1)
+    display.publish_images(at, {'wrist': stable_rgb_array}, generation=1)
+    display.update_task(TaskSnapshot(at, generation=1, episode=1,
+                                    instruction=verified_instruction, source=instruction_source))
 finally:
-    display.close()
+    if not display.close():
+        raise RuntimeError('Display did not close gracefully')
 ```
 
-`publish()` 不等待渲染；队列满会拒收并计数。应检查 `stats.errors`、
-`dropped_full` 和关闭返回值。显示采样与录制不是逐控制周期审计。
-关闭操作限时排空队列、退出显示线程并断开 Rerun。
+原 `LiveMotionDisplay` 是进程内消费器，继续供已有本地使用方与录制测试使用；OpenPI 在线入口统一使用 `LiveDisplayProcess`。
 
-## xense-openpi 侧的边界
+## 任务区域
 
-公共 `ActionStream` 接收完整 chunk、调度后有效队列和提交进度，不包含 Elite 或 20 维假设。
-`VisualizationSession` 管理这些订阅、独立 SDK 状态采样及 XMV 显示线程。
-每种机械臂实现一个 `RobotVisualizationAdapter`：提供静态模型描述、动作到 TCP 位姿的解码、
-以及 SDK 实测状态。Elite 的维度切片、RTSI 访问与夹爪标定均留在 Elite 私有适配中。
+Rerun 0.26.2 默认字体不包含中文，面板标签、占位及运行事件采用英文。真实策略指令原样记录，不翻译。
 
-普通模式的未来参考只包含 `action_horizon` 范围内的动作。RTC 显示原队列完成实际延迟裁剪
-和混合后的参考。PacedBroker 已缓存的动作仍属于待提交参考，直到 runtime 成功向环境提交。
-提交进度只缩短参考，不能证明机械臂已经到达；已走路径始终来自实测 TCP。
+Current Task 显示宿主提供的真实指令及来源、运行状态和 episode。
+没有可信指令时显示 `Task instruction unavailable`；Sub task 和 Current action 固定显示 `Not connected`。
+Task Timeline 是运行事件列表，不推测语义阶段、成功率或任务完成百分比。
 
-默认关闭可视化。关闭时不创建订阅、SDK 采样线程或显示线程，不加载 Rerun；推理与控制继续
-使用现有 broker 和 SDK 连接。启用后的 `set_enabled(False)` 关闭订阅和显示资源；
-SDK 读取若超过关闭等待时限仍阻塞，会报告异常，并阻止新采样线程与旧线程重叠。
+宿主在状态变化时提交 `TaskSnapshot`，携带递增 ID 的 `TaskEvent` 历史。重复快照不会重复写入事件。
+宿主仅保留最近 256 条；显示消费者检测到实际事件序号跳跃时标记缺口。录制是用于显示的采样记录，不是逐控制周期审计或完整图像数据集。
 
-xense-openpi 通过 Git submodule 固定本项目的提交。启用显示的 Elite 入口选择
-`ObservedActionChunkBroker` / `ObservedRTCActionChunkBroker`，复用原有调度和队列计算；
-原公共 broker、动作队列、PacedBroker 和 runtime 不需要为显示修改。
-运行中关闭再开启时，显示会等待新计划，无法恢复已经留在 PacedBroker 中的全部旧缓存。
-需要完整剩余参考时，应在 episode 开始前启用，并保持到该 episode 结束。
+## xense-openpi 接入
+
+`VisualizationSession` 保留独立 SDK 状态采样线程，Elite 适配器仍直接读取 RTSI 与夹爪缓存，不调用 `get_observation()`。
+图像从原 `raw_obs` 在模型筛选之前取出，主路径只发布引用，不再次读取相机。
+`enable_tactile` 继续决定设备采集；显示开关不改设备开关、`robot.cameras` 或连接判定。
+关闭触觉时其面板显示未启用或尚无观测。模型输入仍是原 state、head 与双腕。
+
+两种 runtime 的已有 Subscriber 接口提供 episode 和运行事件。环境包装器提供 reset、观测异常和动作提交异常，
+并保留原错误传播。最终 reset 不会被计为新 episode；运行结束不代表任务成功。Dry run 会标明未发送机器人动作。
+
+当前 Elite 请求不提供 prompt，因此读取服务端握手中带 `request_has_no_prompt` 条件的默认指令元数据。
+该值来自实际输入变换中最先有效的 `InjectDefaultPrompt`；不会修改模型输入或注入优先级。
+如果其他接入方增加请求级 prompt 或改写 prompt 的自定义变换，必须另外提供对应请求的真实指令。
+
+默认关闭显示时，不创建显示进程、搬运线程或 SDK 显示采样，不加载 Rerun。
+SDK 读取超过关闭等待时限会报告异常并阻止重叠启动第二个采样线程。
+动作与状态的既有只读订阅接口保留；RTC 和 PacedBroker 的参考语义不变。
+
+Rerun 继续固定 0.26.2。开发联调应将运行环境的 editable XMV 指向本次新分支；发布时需同步 OpenPI 的子模块固定提交。

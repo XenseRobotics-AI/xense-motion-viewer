@@ -1,0 +1,239 @@
+import os
+import subprocess
+import sys
+import time
+from io import BytesIO
+
+import numpy as np
+import pytest
+from PIL import Image
+from rrd_reader import RrdReader, clear_times
+
+from xense_motion_viewer import RobotDescription, RobotState
+from xense_motion_viewer.live import LiveFrame
+from xense_motion_viewer.live_process import (
+    ImageStream,
+    LiveDisplayProcess,
+    ProcessDisplayConfig,
+    TaskEvent,
+    TaskSnapshot,
+)
+
+
+def wait_for(predicate, timeout=10):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError('Display did not make expected progress')
+        time.sleep(.01)
+
+
+def values(chunks, path, component):
+    return [value for chunk in chunks if chunk.entity_path == '/' + path
+            for batch in [chunk.to_record_batch()] if component in batch.schema.names
+            for value in batch.column(component).to_pylist() if value is not None]
+
+
+def test_child_records_images_tasks_and_independent_motion(robot_urdf, names, tmp_path):
+    path = tmp_path / 'process.rrd'
+    display = LiveDisplayProcess(RobotDescription('robot', robot_urdf, names),
+        config=ProcessDisplayConfig(spawn_viewer=False, save_path=str(path), stale_after=60, capacity=32,
+                                    image_max_edge=16),
+        streams=(ImageStream('wrist', 'Wrist'), ImageStream('touch', 'Tactile')))
+    assert display.pid != os.getpid()
+    red = np.full((30, 50, 3), [250, 0, 0], dtype=np.uint8)
+    copy = red.copy()
+    state = RobotState(.1, dict.fromkeys(names, 0.), tcp_poses={'left': np.eye(4)})
+    try:
+        assert display.update_task(TaskSnapshot(.1, 1, 1, 'Pick up the cup', 'policy default', 'Running',
+                                              (TaskEvent(1, .1, 'Episode 1 started'),)))
+        assert display.publish_images(.1, {'wrist': red, 'touch': red}, generation=1)
+        assert display.publish(LiveFrame(.1, state=state, sample_id='a'), generation=1)
+        wait_for(lambda: display.stats.consumed >= 4)
+        assert display.publish(LiveFrame(.2, state=None), generation=1)
+        assert display.publish(LiveFrame(.3, state=state, sample_id='b'), generation=1)
+        wait_for(lambda: display.stats.consumed >= 6)
+    finally:
+        assert display.close()
+    assert display.stats.errors == 0
+    assert not display.stats.alive
+    assert display.close()
+    assert not display.publish(LiveFrame(1))
+    np.testing.assert_array_equal(red, copy)
+    chunks = list(RrdReader(path).stream())
+    blob = values(chunks, 'live/images/wrist', 'EncodedImage:blob')[0][0]
+    picture = Image.open(BytesIO(bytes(blob)))
+    assert picture.size == (16, 10)
+    color = np.asarray(picture).mean(axis=(0, 1))
+    assert color[0] > 240 and max(color[1:]) < 10
+    assert values(chunks, 'live/images/touch', 'EncodedImage:blob')
+    text = str(values(chunks, 'live/task/current', 'TextDocument:text'))
+    assert 'Pick up the cup' in text and 'Running' in text
+    assert 'Not connected' in str(values(chunks, 'live/task/subtask', 'TextDocument:text'))
+    assert 'Episode 1 started' in str(values(chunks, 'live/task/events', 'TextLog:text'))
+    assert clear_times(chunks, 'world/live/robot/measured/left/current', 'host_elapsed')
+    assert values(chunks, 'world/live/robot/measured/left/history/1', 'LineStrips3D:strips')
+    assert str(display.pid) in str(values(chunks, 'live/display', 'process_id'))
+
+
+def test_generation_clears_old_images_and_rejects_late_old_frames(robot_urdf, names, tmp_path):
+    path = tmp_path / 'epochs.rrd'
+    display = LiveDisplayProcess(RobotDescription('robot', robot_urdf, names),
+        config=ProcessDisplayConfig(spawn_viewer=False, save_path=str(path), stale_after=60),
+        streams=(ImageStream('camera', 'Camera'),))
+    pixels = np.zeros((4, 4, 3), dtype=np.uint8)
+    try:
+        display.publish_images(.1, {'camera': pixels}, generation=1)
+        wait_for(lambda: display.stats.consumed >= 1)
+        display.update_task(TaskSnapshot(.2, generation=2, episode=2))
+        wait_for(lambda: display.stats.consumed >= 2)
+        display.publish_images(.4, {'camera': pixels}, generation=1)
+        display.publish(LiveFrame(.5), generation=2)
+        wait_for(lambda: display.stats.consumed >= 3)
+    finally:
+        assert display.close()
+    assert display.stats.errors == 0
+    chunks = list(RrdReader(path).stream())
+    assert len(values(chunks, 'live/images/camera', 'EncodedImage:blob')) == 1
+    assert clear_times(chunks, 'live/images/camera', 'host_elapsed')
+
+
+def test_image_publication_does_not_copy_and_busy_channels_do_not_block(robot_urdf, names, tmp_path):
+    class BorrowOnly(np.ndarray):
+        def __reduce_ex__(self, protocol):
+            raise AssertionError('Only the background feeder may serialize this test image')
+
+    display = LiveDisplayProcess(RobotDescription('robot', robot_urdf, names),
+        config=ProcessDisplayConfig(spawn_viewer=False, save_path=str(tmp_path / 'busy.rrd')),
+        streams=(ImageStream('camera', 'Camera'),))
+    image = np.zeros((4, 4, 3), dtype=np.uint8).view(BorrowOnly)
+    try:
+        # Serialization failures are contained by the background transfer worker.
+        assert display.publish_images(.1, {'camera': image})
+        wait_for(lambda: display.stats.errors == 1)
+        display._lock.acquire()
+        try:
+            assert not display.publish_images(.3, {'camera': image})
+            assert not display.publish(LiveFrame(.3))
+        finally:
+            display._lock.release()
+        display._process.terminate()
+        display._process.join(3)
+        assert not display.publish(LiveFrame(.4))
+        assert not display.publish_images(.5, {'camera': image})
+    finally:
+        display.close()
+    assert not display.stats.alive
+
+
+def test_no_sink_rejected_and_startup_failure_does_not_leave_worker(robot_urdf, names, tmp_path):
+    with pytest.raises(ValueError, match='Viewer or a recording'):
+        ProcessDisplayConfig(spawn_viewer=False)
+    blocked = tmp_path / 'file'
+    blocked.write_text('not a directory')
+    with pytest.raises(RuntimeError, match='startup failed'):
+        LiveDisplayProcess(RobotDescription('robot', robot_urdf, names),
+            config=ProcessDisplayConfig(spawn_viewer=False, save_path=str(blocked / 'bad.rrd')))
+
+
+@pytest.mark.parametrize('reset', [False, True])
+def test_motion_boundaries_survive_a_busy_ipc_channel(robot_urdf, names, tmp_path, reset):
+    path = tmp_path / 'busy-motion.rrd'
+    display = LiveDisplayProcess(RobotDescription('robot', robot_urdf, names),
+        config=ProcessDisplayConfig(spawn_viewer=False, save_path=str(path)))
+    def state(x):
+        pose = np.eye(4)
+        pose[0, 3] = x
+        return RobotState(.1, dict.fromkeys(names, 0.), tcp_poses={'tcp': pose})
+    try:
+        display.publish(LiveFrame(.1, state=state(1), sample_id='a'), generation=1)
+        wait_for(lambda: display.stats.consumed >= 1)
+        display._channels['motion'].lock.acquire()
+        try:
+            assert display.publish(LiveFrame(.2, reset=reset), generation=1)
+            wait_for(lambda: display._in_flight == 1)
+            assert display.publish(LiveFrame(.3, state=state(2), sample_id='b'), generation=1)
+        finally:
+            display._channels['motion'].lock.release()
+        wait_for(lambda: display.stats.consumed >= 3)
+    finally:
+        assert display.close()
+    chunks = list(RrdReader(path).stream())
+    history = values(chunks, 'world/live/robot/measured/tcp/history/0', 'LineStrips3D:strips')
+    assert all(len(row[0]) == 1 for row in history)
+    assert display.stats.errors == 0
+
+
+def test_task_arrival_does_not_change_motion_time_or_accept_older_task(robot_urdf, names, tmp_path):
+    path = tmp_path / 'independent-time.rrd'
+    display = LiveDisplayProcess(RobotDescription('robot', robot_urdf, names),
+        config=ProcessDisplayConfig(spawn_viewer=False, save_path=str(path)))
+    try:
+        newer = TaskSnapshot(.2, generation=1, status='NEW', events=(TaskEvent(2, .2, 'NEW_EVENT'),))
+        older = TaskSnapshot(.1, generation=1, status='OLD', events=(TaskEvent(1, .1, 'OLD_EVENT'),))
+        display.update_task(newer)
+        wait_for(lambda: display.stats.consumed >= 1)
+        display.update_task(older)
+        display.publish(LiveFrame(.1, state=RobotState(.1, dict.fromkeys(names, 0.)), sample_id='a'), generation=1)
+        wait_for(lambda: display.stats.consumed >= 2)
+    finally:
+        assert display.close()
+    assert display.stats.errors == 0
+    chunks = list(RrdReader(path).stream())
+    tasks = str(values(chunks, 'live/task/current', 'TextDocument:text'))
+    assert 'NEW' in tasks and 'OLD' not in tasks
+    assert any(c.entity_path.startswith('/world/robots/robot') and not c.is_static for c in chunks)
+
+
+def test_rolling_task_window_only_marks_events_the_consumer_missed(robot_urdf, names, tmp_path):
+    path = tmp_path / 'events.rrd'
+    display = LiveDisplayProcess(RobotDescription('robot', robot_urdf, names),
+        config=ProcessDisplayConfig(spawn_viewer=False, save_path=str(path)))
+    try:
+        events = tuple(TaskEvent(i, i / 1000, f'event-{i}') for i in range(1, 257))
+        display.update_task(TaskSnapshot(1, events=events))
+        wait_for(lambda: display.stats.consumed >= 1)
+        events = (*events[1:], TaskEvent(257, .257, 'event-257'))
+        display.update_task(TaskSnapshot(2, events=events, dropped_events=1))
+        wait_for(lambda: display.stats.consumed >= 2)
+        display.update_task(TaskSnapshot(3, events=(TaskEvent(260, 3, 'event-260'),), dropped_events=259))
+        wait_for(lambda: display.stats.consumed >= 3)
+    finally:
+        assert display.close()
+    logs = values(list(RrdReader(path).stream()), 'live/task/events', 'TextLog:text')
+    gaps = [text for row in logs for text in row if 'event gap' in text]
+    assert gaps == ['Runtime event gap: 2 missing']
+
+
+def test_host_never_imports_rerun_even_when_display_is_active(robot_urdf, names, tmp_path):
+    script = tmp_path / 'host.py'
+    script.write_text(f'''
+import sys
+from xense_motion_viewer import RobotDescription
+from xense_motion_viewer.live_process import LiveDisplayProcess, ProcessDisplayConfig
+
+if __name__ == '__main__':
+    assert 'rerun' not in sys.modules
+    display = LiveDisplayProcess(RobotDescription('robot', {str(robot_urdf)!r}, {names!r}),
+        config=ProcessDisplayConfig(spawn_viewer=False, save_path={str(tmp_path / 'host.rrd')!r}))
+    try:
+        assert 'rerun' not in sys.modules
+    finally:
+        assert display.close()
+''')
+    subprocess.run([sys.executable, str(script)], check=True, timeout=20)
+
+
+def test_close_with_busy_motion_transport_stops_and_can_be_repeated(robot_urdf, names, tmp_path):
+    display = LiveDisplayProcess(RobotDescription('robot', robot_urdf, names),
+        config=ProcessDisplayConfig(spawn_viewer=False, save_path=str(tmp_path / 'close.rrd')))
+    display._channels['motion'].lock.acquire()
+    try:
+        assert display.publish(LiveFrame(.1, reset=True))
+        wait_for(lambda: display._in_flight == 1)
+        display.close(timeout=.05)
+    finally:
+        display._channels['motion'].lock.release()
+    assert display.close()
+    assert not display.stats.alive
+    assert display.stats.discarded_close >= 1
