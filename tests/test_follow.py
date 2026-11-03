@@ -1,4 +1,5 @@
 import copy
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -109,6 +110,8 @@ def test_record_replay_preserves_command_order_steps_hands_and_grippers(tmp_path
     trace = original.trace
     path = tmp_path / 'follow.json'
     trace.save(path)
+    document = json.loads(path.read_text())
+    assert document['schema'] == 'xmv-follow-v1'
     loaded = FollowTrace.load(path)
     replay, output, feedback = engine()
     feedback['left'][0, 3] += .05  # Replay uses recorded goals, never a fresh grip mapping.
@@ -120,6 +123,10 @@ def test_record_replay_preserves_command_order_steps_hands_and_grippers(tmp_path
     assert replay.trace.samples == loaded.samples
     assert replay.trace.metadata['build'] == 'B'
     assert replay.trace.end_reason == 'completed'
+    document['schema'] = 'rmw-follow-v1'
+    path.write_text(json.dumps(document))
+    with pytest.raises(ValueError, match='Unsupported Follow recording schema'):
+        FollowTrace.load(path)
 
 
 @pytest.mark.parametrize('mutation', ['negative_step', 'unordered', 'nan_pose', 'duration', 'reflection'])

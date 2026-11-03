@@ -1,6 +1,6 @@
 # Elite 输入、状态与运行时
 
-`EliteStationAdapter` 将 `libpyelite.sim.StationSimulation` 接到工作台。
+`EliteStationAdapter` 将 `libpyelite.sim.StationSimulation` 接到 xense-motion-viewer。
 Qt 与 Policy 共用 `RobotSession` 和目标提交接口；原生 SDK 负责 IK、规划、
 速度与加速度限制、碰撞检查及错误锁存。
 
@@ -46,8 +46,8 @@ inputs.close()
 显式接管后，旧 Qt 输入无法提交或重置机器人；关闭旧输入也不会释放新输入的所有权。
 释放输入权不等于取消 SDK 已接受的目标。
 
-`xmv-elite-qt` 复用 SDK 的 Joint / IK 面板，输入通过会话转发。
-两页夹爪目标同步；观察刷新不会再次提交目标。夹爪输入还会让 Viewer 返回当前仿真时间。
+`xmv-elite-qt` 复用 SDK 的 Joint / IK 面板，并增加仅用于离线仿真的 Follow 虚拟手柄页，输入通过会话转发。
+三页夹爪目标同步，观察刷新不会再次提交目标。Rerun 0.26.2 的时间跟随由 Viewer 控制。
 
 SDK 调用在宿主线程执行。`EliteSandboxRuntime.poll()` 沿用原生沙盒的有限追赶调度，
 逐步调用 `StationSimulation.step()`。碰撞检查失败时保留原生锁存行为，需显式重置。
@@ -60,5 +60,5 @@ SDK 调用在宿主线程执行。`EliteSandboxRuntime.poll()` 沿用原生沙�
 碰撞包络显示开关不改变原生碰撞检查。
 
 应用同时持有实时 Rerun 服务和可选文件 sink。关闭 Viewer 不影响仿真或录制，
-重连补发场景快照；已连接时再次打开不会重置相机。显示错误和关闭超时通过统计及退出状态报告。
+重连补发场景快照，相机与时间跟随由 Viewer 控制。显示错误和关闭超时通过统计及退出状态报告。
 录制包含显示采样，不保证保存每个原生控制周期。
