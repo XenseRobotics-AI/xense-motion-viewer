@@ -8,8 +8,8 @@ import pytest
 pytest.importorskip('libpyelite')
 from libpyelite.sim import StationSimulation
 from libpyelite.control_profile import describe_config
-from robot_motion_workbench import JointTarget, RobotSession, TcpTarget
-from robot_motion_workbench.adapters.elite import EliteStationAdapter, _simulation
+from xense_motion_viewer import JointTarget, RobotSession, TcpTarget
+from xense_motion_viewer.adapters.elite import EliteStationAdapter, _simulation
 
 pytestmark = pytest.mark.elite
 

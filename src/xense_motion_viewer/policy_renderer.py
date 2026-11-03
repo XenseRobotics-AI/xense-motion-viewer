@@ -7,6 +7,7 @@ import numpy as np
 from .control import JointTarget, TcpTarget
 from .policy import PolicyChunk, StepRef, StreamEvent
 from .rerun_renderer import RerunRenderer, segment
+from .rerun_compat import time_panel, eye_controls
 
 
 def command_data(command):
@@ -102,6 +103,7 @@ class PolicyRerunRenderer:
         import rerun as rr
         self.rr, self.recording = rr, recording
         self.robot = RerunRenderer(recording, timeline=timeline, compact=compact)
+        self.rr = self.robot.rr
         self.model = self.robot.add_robot(description)
         self.description, self.timeline, self.max_age = description, timeline, max_age
         self.root = f'world/policy/{segment(description.instance_id)}'
@@ -136,17 +138,15 @@ class PolicyRerunRenderer:
                     contents=['/world/**', f'- /{self.robot.instance_path(self.description.instance_id)}/collision/**'],
                     name='TCP: remaining reference (blue) / target (orange) / feedback (green)')
             contents = rrb.Horizontal(self._scene, status, column_shares=[4, 1]) if self._telemetry else self._scene
-            self.recording.send_blueprint(rrb.Blueprint(contents, rrb.TimePanel(
-                timeline=self.timeline,
-                play_state='following' if not self._camera_initialized else None)))
+            self.recording.send_blueprint(rrb.Blueprint(contents, time_panel(
+                self.timeline, follow=not self._camera_initialized)))
             return
         tcp = segment(channel.active.tcp) if channel.active is not None and channel.active.tcp else '*'
         eye = None
         if channel.active is not None and channel.active.kind == 'absolute_tcp_poses':
             center = channel.active.values[:, :3, 3].mean(axis=0)
             extent = max(float(np.ptp(channel.active.values[:, :3, 3], axis=0).max()), 0.1)
-            eye = rrb.EyeControls3D(position=center + extent * np.array([1.4, -1.8, 1.6]),
-                                   look_target=center, eye_up=[0, 0, 1])
+            eye = eye_controls(center + extent * np.array([1.4, -1.8, 1.6]), center, [0, 0, 1])
         reference = (rrb.Spatial2DView(origin=f'{channel.panel}/joint_reference',
                      name='Full joint chunk: offset (s) / SI position')
                      if channel.kind == 'absolute_joint_positions' else
@@ -229,10 +229,11 @@ class PolicyRerunRenderer:
             offset = np.array([.5, -.65, .45])
             if len(self._channels) > 1:
                 offset *= max(1.5, float(np.ptp(points, axis=0).max()) / .4)
-            self._scene.properties['EyeControls3D'] = rrb.EyeControls3D(
-                position=center + offset, look_target=center + [0., 0., .07], eye_up=[0, 0, 1])
+            eye = eye_controls(center + offset, center + [0., 0., .07], [0, 0, 1])
+            if eye is not None:
+                self._scene.properties['EyeControls3D'] = eye
             self.blueprint()
-            self._scene.properties.pop('EyeControls3D')
+            self._scene.properties.pop('EyeControls3D', None)
             self._camera_initialized = True
 
     def _tcp_path(self, path, points, chunk):

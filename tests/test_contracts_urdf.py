@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from robot_motion_workbench import RobotDescription, RobotState, ToolFrame
-from robot_motion_workbench.urdf import URDFModel
+from xense_motion_viewer import RobotDescription, RobotState, ToolFrame
+from xense_motion_viewer.urdf import URDFModel
 
 
 def test_snapshots_are_defensive_and_rigid(robot_urdf, names):

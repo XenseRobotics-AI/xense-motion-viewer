@@ -1,6 +1,6 @@
 # Policy 参考、轨迹与遥测
 
-`rmw-elite-policy` 将采集动作或手写目标作为参考，驱动原生 Elite 双臂仿真。
+`xmv-elite-policy` 将采集动作或手写目标作为参考，驱动原生 Elite 双臂仿真。
 它不运行模型推理；显示和回放都不取得机器人输入权。
 
 ## 参考与执行
@@ -38,7 +38,7 @@ XYZ 单位为米，6D 姿态表示旋转矩阵的前两列，加载时正交化�
 ```sh
 python scripts/import_elite_episode.py /path/to/dataset \
   --episode 1 --output recordings/episode-1.npz
-rmw-elite-policy --trajectory recordings/episode-1.npz
+xmv-elite-policy --trajectory recordings/episode-1.npz
 ```
 
 导入需要 PyArrow，随 `rerun` 可选依赖安装。输入数据集须为 `v3.0` 格式，
@@ -61,8 +61,8 @@ TCP 是配置工具坐标系的世界位置，不是某根手指的尖端；夹�
 
 每个 chunk 的坐标只发送一次，进度更新只修改已提交部分的显示状态和橙点位置。
 绿色历史采用最多 32 个小段循环保存，每段最多 64 点，相邻段共享端点；只更新正在追加的段，
-不重复发送整条历史。机器人将变化的姿态批量发送；每条变换保留 Rerun 所需的父子坐标系标识，
-网格只在初始化时发送。
+不重复发送整条历史。机器人只发送变化的姿态，网格只在初始化时发送。
+Rerun 0.26.2 使用实体树放置网格，并由 SDK 微批处理变换；新版 SDK 则保留命名坐标系标识。
 
 `--display-hz 30`（默认）或 `--display-hz 60` 设置状态采样与显示批次频率，按仿真时间调度。
 在跨过采样时刻的第一个原生步读取当前状态，结束时补齐最终状态；不改变动作提交和仿真步长。
@@ -95,5 +95,5 @@ Elite 按显示周期将参考变化、提交记录和当前状态一起入队�
 显示录制也不作为完整控制审计。
 
 关闭时先释放输入，再限时排空显示队列、刷新并断开 Rerun。
-`rmw-policy-replay recording.rrd` 只启动 Viewer，`replay_events()` 只消费不可变事件，
+`xmv-policy-replay recording.rrd` 只启动 Viewer，`replay_events()` 只消费不可变事件，
 两者都不会执行录制中的目标。

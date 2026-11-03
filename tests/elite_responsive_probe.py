@@ -11,7 +11,7 @@ import rerun as rr
 from libpyelite.sim import StationSimulation
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QPushButton
-from robot_motion_workbench.adapters.elite import EliteRerunView, make_qt_window
+from xense_motion_viewer.adapters.elite import EliteRerunView, make_qt_window
 
 root = Path(sys.argv[1]); root.mkdir(exist_ok=True)
 sim = StationSimulation(collision_profile='auto')

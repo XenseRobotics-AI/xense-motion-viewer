@@ -5,7 +5,7 @@ import sys
 import numpy as np
 import pytest
 
-from robot_motion_workbench import (
+from xense_motion_viewer import (
     CallbackRobotAdapter, ControlCapabilities, InputOwnershipError, JointControl,
     JointTarget, RobotDescription, RobotSession, RobotState, TcpControl, TcpTarget,
 )
@@ -157,9 +157,9 @@ class Block(importlib.abc.MetaPathFinder):
         if fullname.split('.')[0] in blocked:
             raise ModuleNotFoundError('blocked ' + fullname, name=fullname)
 sys.meta_path.insert(0, Block())
-from robot_motion_workbench import RobotSession, JointTarget, TcpTarget, CallbackRobotAdapter
-from robot_motion_workbench.adapters.elite import _simulation
-import robot_motion_workbench.rerun_renderer
+from xense_motion_viewer import RobotSession, JointTarget, TcpTarget, CallbackRobotAdapter
+from xense_motion_viewer.adapters.elite import _simulation
+import xense_motion_viewer.rerun_renderer
 from types import SimpleNamespace
 assert not blocked.intersection(sys.modules)
 try:
