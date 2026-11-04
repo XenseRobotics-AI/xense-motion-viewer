@@ -366,7 +366,7 @@ class LiveDisplayProcess:
             for key, (generation, at, rgb) in images.items():
                 self._send(key, ('image', generation, at, (key, rgb)), latest=True)
             with self._lock:
-                drained = not pending and not self._motion and self._task is None
+                drained = not pending and not self._motion and not self._images and self._task is None
                 expired = self._closing_deadline is not None and time.monotonic() >= self._closing_deadline
                 if not self._process.is_alive() or expired:
                     self._discarded += len(pending) + len(self._motion) + len(self._images) + int(self._task is not None)

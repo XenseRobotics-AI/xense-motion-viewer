@@ -246,6 +246,58 @@ def test_close_with_busy_motion_transport_stops_and_can_be_repeated(robot_urdf, 
     assert display.stats.discarded_close >= 1
 
 
+def test_close_drains_image_published_during_previous_transfer(robot_urdf, names, tmp_path, monkeypatch):
+    path = tmp_path / 'close-images.rrd'
+    display = LiveDisplayProcess(RobotDescription('robot', robot_urdf, names),
+        config=ProcessDisplayConfig(spawn_viewer=False, save_path=str(path), stale_after=60),
+        streams=(ImageStream('camera', 'Camera'),))
+    entered, release = threading.Event(), threading.Event()
+    real_send = display._send
+
+    def paused_send(key, *args, **kwargs):
+        sent = real_send(key, *args, **kwargs)
+        if key == 'camera' and not entered.is_set():
+            # Consume the first image so the latest-only IPC slot cannot coalesce it.
+            wait_for(lambda: display.stats.consumed == 1)
+            entered.set()
+            assert release.wait(5)
+        return sent
+
+    monkeypatch.setattr(display, '_send', paused_send)
+    closed = []
+    closer = threading.Thread(target=lambda: closed.append(display.close(timeout=5)))
+    try:
+        assert display.publish_images(.1, {'camera': np.zeros((4, 4, 3), dtype=np.uint8)}, generation=1)
+        assert entered.wait(5)
+        assert display.publish_images(.3, {'camera': np.full((4, 4, 3), 255, dtype=np.uint8)}, generation=1)
+        closer.start()
+        wait_for(lambda: display.stats.closed)
+        release.set()
+        closer.join(6)
+        assert not closer.is_alive()
+    finally:
+        release.set()
+        if closer.ident is not None:
+            closer.join(6)
+        display.close()
+
+    assert closed == [True]
+    stats = display.stats
+    assert stats.accepted == stats.consumed == 2
+    assert stats.pending == 0
+    assert stats.dropped_full == stats.discarded_close == stats.errors == stats.coalesced == 0
+    assert not stats.alive
+    chunks = list(RrdReader(path).stream())
+    rows = [(at, image) for chunk in chunks if chunk.entity_path == '/live/images/camera'
+            for batch in [chunk.to_record_batch()] if 'EncodedImage:blob' in batch.schema.names
+            for at, image in zip(batch.column('host_elapsed').cast('int64').to_pylist(),
+                                 batch.column('EncodedImage:blob').to_pylist()) if image]
+    assert [at for at, _ in rows] == [100000000, 300000000]
+    for (_, image), color in zip(rows, (0, 255), strict=True):
+        picture = Image.open(BytesIO(bytes(image[0])))
+        assert np.all(np.asarray(picture) == color)
+
+
 def _display_without_window(*args):
     import rerun as rr
 
