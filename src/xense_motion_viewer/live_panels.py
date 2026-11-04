@@ -69,7 +69,6 @@ class TaskSnapshot:
 class LivePanels:
     def __init__(self, recording, motion, streams, *, max_edge, jpeg_quality, stale_after):
         import rerun as rr
-        import rerun.blueprint as rrb
 
         self.rr, self.recording, self.motion = rr, recording, motion
         self.streams = {stream.key: stream for stream in streams}
@@ -77,7 +76,25 @@ class LivePanels:
         self._image_times = {}
         self._last_event = -1
         self._motion_reset_pending = False
+        self._task_timeline_time = -1.0
         self.generation = -1
+        self.blueprint()
+        recording.set_time(motion.timeline, duration=0)
+        recording.log('live/display', rr.AnyValues(process_id=os.getpid()))
+        recording.log('live/task/timeline/task',
+                      rr.SeriesLines(colors=[128, 128, 128], names='Task', widths=3), static=True)
+        self.task_timeline(0, force=True)
+        for key in self.streams:
+            self._status(key, 'Disabled or no observation')
+        recording.log('live/task/subtask', rr.TextDocument('Not connected'))
+        recording.log('live/task/action', rr.TextDocument('Not connected'))
+        self.task(TaskSnapshot(0))
+
+    def blueprint(self):
+        """Make the combined motion, task and image layout active and default."""
+        import rerun.blueprint as rrb
+
+        motion = self.motion
         world = rrb.Spatial3DView(origin='world', name='Robot / reference / measured motion',
                                  contents=['/world/**', f'- /{motion.robot.instance_path(motion.description.instance_id)}/collision/**'])
         tasks = rrb.Vertical(
@@ -86,25 +103,30 @@ class LivePanels:
                            rrb.TextDocumentView(origin='live/task/action', name='Current Action')),
             row_shares=[2, 1])
         left = rrb.Vertical(world, tasks, row_shares=[3, 1])
-        views = []
-        for stream in streams:
-            views.append(rrb.Vertical(
-                rrb.Spatial2DView(origin=self.image_path(stream.key), name=stream.label),
-                rrb.TextDocumentView(origin=self.status_path(stream.key), name=f'{stream.label} | Status'),
-                row_shares=[3, 1]))
-        content = rrb.Horizontal(left, rrb.Vertical(
-            *(rrb.Horizontal(*views[i:i + 2]) for i in range(0, len(views), 2)))) if views else left
-        recording.send_blueprint(rrb.Blueprint(
-            rrb.Vertical(content, rrb.TextLogView(origin='live/task/events', name='Task Timeline | Runtime events'),
-                         row_shares=[8, 1]), rrb.TimePanel(timeline=motion.timeline, state='collapsed'),
+        views = {stream.key: rrb.Spatial2DView(origin=self.image_path(stream.key), name=stream.label)
+                 for stream in self.streams.values()}
+        rows = []
+        for streams in self._image_rows():
+            row = [views[stream.key] for stream in streams]
+            rows.append(row[0] if len(row) == 1 else rrb.Horizontal(*row))
+        content = rrb.Horizontal(left, rrb.Vertical(*rows), column_shares=[1, 1]) if views else left
+        timeline = rrb.TimeSeriesView(origin='live/task/timeline', name='Task Timeline',
+            axis_y=rrb.ScalarAxis(range=(-.5, .5), zoom_lock=True),
+            plot_legend=rrb.PlotLegend(visible=True))
+        self.recording.send_blueprint(rrb.Blueprint(
+            rrb.Vertical(content, timeline, row_shares=[8, 1]),
+            rrb.TimePanel(timeline=motion.timeline, state='collapsed'),
             rrb.BlueprintPanel(state='collapsed'), rrb.SelectionPanel(state='collapsed')))
-        recording.set_time(motion.timeline, duration=0)
-        recording.log('live/display', rr.AnyValues(process_id=os.getpid()))
-        for key in self.streams:
-            self._status(key, 'Disabled or no observation')
-        recording.log('live/task/subtask', rr.TextDocument('Not connected'))
-        recording.log('live/task/action', rr.TextDocument('Not connected'))
-        self.task(TaskSnapshot(0))
+
+    def _image_rows(self):
+        streams = tuple(self.streams.values())
+        rows = []
+        offset = 0
+        if len(streams) % 2:
+            rows.append(streams[:1])
+            offset = 1
+        rows.extend(streams[index:index + 2] for index in range(offset, len(streams), 2))
+        return tuple(rows)
 
     @staticmethod
     def image_path(key):
@@ -130,7 +152,18 @@ class LivePanels:
             # Other streams may arrive ahead of an earlier sampled SDK frame.
             # Reset on the first motion sample without changing its source clock.
             self._motion_reset_pending = True
+        self.task_timeline(at)
         return True
+
+    def task_timeline(self, at, *, force=False):
+        elapsed(at)
+        if at <= self._task_timeline_time:
+            return
+        if not force and self._task_timeline_time >= 0 and at - self._task_timeline_time < .5:
+            return
+        self.recording.set_time(self.motion.timeline, duration=at)
+        self.recording.log('live/task/timeline/task', self.rr.Scalars(0.0))
+        self._task_timeline_time = at
 
     def motion_frames(self, frames):
         if self._motion_reset_pending:
@@ -155,6 +188,31 @@ class LivePanels:
         self._status(key, f'Observed at {at:.3f} s (not exposure time)')
         self._image_times[key] = at
 
+    def video(self, key, path, *, source_from, source_to, expected_frames=None):
+        """Embed one MP4 and reference only an episode-local source interval."""
+        if key not in self.streams:
+            raise ValueError(f'Unknown image stream: {key}')
+        if (not np.isfinite(source_from) or not np.isfinite(source_to)
+                or source_from < 0 or source_to <= source_from):
+            raise ValueError('Video source interval must be finite, nonnegative and increasing')
+        asset = self.rr.AssetVideo(path=path)
+        timestamps = np.asarray(asset.read_frame_timestamps_nanos(), dtype=np.int64)
+        seconds = timestamps / 1e9
+        selected = (seconds >= source_from) & (seconds < source_to)
+        timestamps = timestamps[selected]
+        host_times = seconds[selected] - source_from
+        if not len(timestamps):
+            raise ValueError(f'No video frames in the episode interval for {key}')
+        if expected_frames is not None and len(timestamps) != expected_frames:
+            raise ValueError(f'{key} has {len(timestamps)} video frames; expected {expected_frames}')
+        self.recording.log(self.image_path(key), asset, static=True)
+        self.recording.send_columns(self.image_path(key),
+            indexes=[self.rr.TimeColumn(self.motion.timeline, duration=host_times)],
+            columns=self.rr.VideoFrameReference.columns_nanos(timestamps))
+        self.recording.set_time(self.motion.timeline, duration=0)
+        self._status(key, f'Embedded {len(timestamps)} source frames for this episode')
+        return host_times
+
     def expire(self, now):
         for key, at in tuple(self._image_times.items()):
             if now - at > self.stale_after:
@@ -164,6 +222,7 @@ class LivePanels:
                 del self._image_times[key]
 
     def task(self, snapshot):
+        self.task_timeline(snapshot.time, force=True)
         self.recording.set_time(self.motion.timeline, duration=snapshot.time)
         instruction = 'Task instruction unavailable' if snapshot.instruction is None else snapshot.instruction
         self.recording.log('live/task/current', self.rr.TextDocument(

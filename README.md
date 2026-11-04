@@ -9,7 +9,7 @@
 - **真实 Policy + SDK 状态**：接收未来 TCP 参考与真实关节/TCP 状态，显示机器人、已走轨迹与当前点。
   通过公共只读接口接入，详见 [在线显示接口](docs/live.md)。
   在线显示使用独立进程，支持宿主提供的 RGB 图像、真实任务指令和运行事件。
-  Elite 接入提供双腕与四路触觉面板，子任务和语义动作暂标为 `Not connected`。
+  Elite 接入提供头部、双腕与四路触觉面板，子任务和语义动作暂标为 `Not connected`。
 
 Elite 离线工具支持 `diagonal-07`、`diagonal-08` 两种站点，以及 RRD 录制、回放和 Viewer 重连。
 在线显示由宿主提供真机数据；机器人控制、SDK 连接和 VLA 推理均由宿主管理。
@@ -82,6 +82,17 @@ xmv-policy-replay recordings/elite-policy.rrd
 xmv-elite-policy --no-viewer --fast --steps 320 --save recordings/smoke.rrd
 python -m rerun rrd verify recordings/smoke.rrd
 ```
+
+从 LeRobot v3 数据集生成带任务及头部、双腕、四路触觉视频的自包含回放：
+
+```sh
+python scripts/import_elite_episode.py DATASET --episode 1 --output /tmp/episode-001.npz
+xmv-elite-policy --trajectory /tmp/episode-001.npz --dataset-media DATASET --episode 1 \
+  --no-viewer --fast --save recordings/episode-001.rrd
+```
+
+数据集媒体回放使用同步显示写入，不采用在线队列的丢帧语义。`--fast` 只取消墙钟节拍；
+原始动作时间、原生仿真步、30 Hz 显示采样及每路视频帧引用均保留。
 
 `xmv-elite-record` 可单独录制原生仿真状态。录制采用显示采样，可能合并或丢弃显示帧，不是逐控制周期的完整记录；提交成功也不代表已发送或已到达。
 

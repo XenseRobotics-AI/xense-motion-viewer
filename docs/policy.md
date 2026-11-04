@@ -94,6 +94,9 @@ Elite 按显示周期将参考变化、提交记录和当前状态一起入队�
 应检查 `display_frames`、丢弃及错误计数和 `display_closed`；消费事件数不等于实际绘图帧数，
 显示录制也不作为完整控制审计。
 
+提供 `--dataset-media` 时，离线数据集回放改用同步显示写入，任务和七路视频与运动事件写入同一 RRD，
+任一视频帧数与所选 episode 不一致时直接失败。该模式不丢显示事件；`--fast` 仅取消墙钟等待。
+
 关闭时先释放输入，再限时排空显示队列、刷新并断开 Rerun。
 `xmv-policy-replay recording.rrd` 只启动 Viewer，`replay_events()` 只消费不可变事件，
 两者都不会执行录制中的目标。

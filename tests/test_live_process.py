@@ -38,10 +38,12 @@ def values(chunks, path, component):
 
 def test_child_records_images_tasks_and_independent_motion(robot_urdf, names, tmp_path):
     path = tmp_path / 'process.rrd'
+    image_keys = ('head', 'left_wrist', 'right_wrist', 'left_tactile_left',
+                  'right_tactile_left', 'left_tactile_right', 'right_tactile_right')
     display = LiveDisplayProcess(RobotDescription('robot', robot_urdf, names),
         config=ProcessDisplayConfig(spawn_viewer=False, save_path=str(path), stale_after=60, capacity=32,
                                     image_max_edge=16),
-        streams=(ImageStream('wrist', 'Wrist'), ImageStream('touch', 'Tactile')))
+        streams=tuple(ImageStream(key, key.replace('_', ' ').title()) for key in image_keys))
     assert display.pid != os.getpid()
     red = np.full((30, 50, 3), [250, 0, 0], dtype=np.uint8)
     copy = red.copy()
@@ -49,12 +51,12 @@ def test_child_records_images_tasks_and_independent_motion(robot_urdf, names, tm
     try:
         assert display.update_task(TaskSnapshot(.1, 1, 1, 'Pick up the cup', 'policy default', 'Running',
                                               (TaskEvent(1, .1, 'Episode 1 started'),)))
-        assert display.publish_images(.1, {'wrist': red, 'touch': red}, generation=1)
+        assert display.publish_images(.1, dict.fromkeys(image_keys, red), generation=1)
         assert display.publish(LiveFrame(.1, state=state, sample_id='a'), generation=1)
-        wait_for(lambda: display.stats.consumed >= 4)
+        wait_for(lambda: display.stats.consumed >= 9)
         assert display.publish(LiveFrame(.2, state=None), generation=1)
         assert display.publish(LiveFrame(.3, state=state, sample_id='b'), generation=1)
-        wait_for(lambda: display.stats.consumed >= 6)
+        wait_for(lambda: display.stats.consumed >= 11)
     finally:
         assert display.close()
     assert display.stats.errors == 0
@@ -63,16 +65,19 @@ def test_child_records_images_tasks_and_independent_motion(robot_urdf, names, tm
     assert not display.publish(LiveFrame(1))
     np.testing.assert_array_equal(red, copy)
     chunks = list(RrdReader(path).stream())
-    blob = values(chunks, 'live/images/wrist', 'EncodedImage:blob')[0][0]
+    blob = values(chunks, 'live/images/head', 'EncodedImage:blob')[0][0]
     picture = Image.open(BytesIO(bytes(blob)))
     assert picture.size == (16, 10)
     color = np.asarray(picture).mean(axis=(0, 1))
     assert color[0] > 240 and max(color[1:]) < 10
-    assert values(chunks, 'live/images/touch', 'EncodedImage:blob')
+    for key in image_keys:
+        assert values(chunks, f'live/images/{key}', 'EncodedImage:blob')
     text = str(values(chunks, 'live/task/current', 'TextDocument:text'))
     assert 'Pick up the cup' in text and 'Running' in text
     assert 'Not connected' in str(values(chunks, 'live/task/subtask', 'TextDocument:text'))
     assert 'Episode 1 started' in str(values(chunks, 'live/task/events', 'TextLog:text'))
+    assert values(chunks, 'live/task/timeline/task', 'Scalars:scalars')
+    assert values(chunks, 'live/task/timeline/task', 'SeriesLines:colors')
     assert clear_times(chunks, 'world/live/robot/measured/left/current', 'host_elapsed')
     assert values(chunks, 'world/live/robot/measured/left/history/1', 'LineStrips3D:strips')
     assert str(display.pid) in str(values(chunks, 'live/display', 'process_id'))

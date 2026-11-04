@@ -1,17 +1,45 @@
 """Runnable offline policy producer; native Elite simulation stays on main thread."""
 import argparse
-from dataclasses import asdict, replace
 import json
-from pathlib import Path
 import subprocess
 import sys
 import time
+from dataclasses import asdict, replace
+from pathlib import Path
 
 import numpy as np
 
 from ..control import JointTarget, RobotSession
 from ..policy import JointPreview, PolicyChunk, PolicyInput, SampleTime, StreamEvent
-from ..streams import VisualizationWorker
+from ..streams import DisplayStats, VisualizationWorker
+
+
+class _SynchronousPolicyDisplay:
+    """Deterministic offline sink; unlike the live worker it cannot drop events."""
+    def __init__(self, renderer):
+        self.renderer = renderer
+        self.accepted = self.consumed = 0
+        self.closed = False
+
+    def publish_many(self, events):
+        if self.closed:
+            raise RuntimeError('Synchronous display is closed')
+        events = tuple(events)
+        self.accepted += len(events)
+        self.renderer.consume_batch(events)
+        self.consumed += len(events)
+        return True
+
+    @property
+    def stats(self):
+        return DisplayStats(self.accepted, self.consumed, 0, 0, 0, 0, 0,
+                            self.closed, not self.closed, None)
+
+    def close(self, *, timeout=None):
+        if not self.closed:
+            self.closed = True
+            self.renderer.close()
+        return True
 
 
 def example_chunk(adapter, *, kind, chunk_id, now, anchor=None, direction=1, side=None):
@@ -45,9 +73,9 @@ def example_chunk(adapter, *, kind, chunk_id, now, anchor=None, direction=1, sid
 
 
 def main(argv=None):
+    from ..policy_renderer import PolicyRerunRenderer
     from .elite import EliteStationAdapter, _recording, _simulation
     from .elite_trajectory import DEFAULT_TRAJECTORY, RecordedTrajectory
-    from ..policy_renderer import PolicyRerunRenderer
     parser = argparse.ArgumentParser(description='Offline Elite full policy chunk + native response; no hardware')
     parser.add_argument('--station', choices=['diagonal-07', 'diagonal-08'])
     parser.add_argument('--recipe', type=Path)
@@ -57,6 +85,10 @@ def main(argv=None):
     parser.add_argument('--source', choices=['recorded', 'synthetic'],
                         help='Default: recorded for TCP; synthetic for --kind joint (dataset has no joints)')
     parser.add_argument('--trajectory', type=Path, help='Exported episode .npz; default is bundled episode 0')
+    parser.add_argument('--dataset-media', type=Path,
+                        help='LeRobot v3 dataset root providing task and seven embedded episode videos')
+    parser.add_argument('--episode', type=int,
+                        help='Episode for --dataset-media; default is the trajectory episode')
     parser.add_argument('--arm', choices=['both', 'left', 'right'], default='both',
                         help='Default: synchronized dual-arm playback; left/right selects one arm')
     length = parser.add_mutually_exclusive_group()
@@ -81,12 +113,27 @@ def main(argv=None):
         parser.error('Recorded episode contains TCP actions, not joint angles; use --kind tcp')
     if args.trajectory is not None and source != 'recorded':
         parser.error('--trajectory requires --source recorded')
+    if args.dataset_media is not None and source != 'recorded':
+        parser.error('--dataset-media requires --source recorded')
+    if args.episode is not None and args.dataset_media is None:
+        parser.error('--episode requires --dataset-media')
     arms = ('left', 'right') if args.arm == 'both' else (args.arm,)
     trajectories = ({side: RecordedTrajectory(args.trajectory or DEFAULT_TRAJECTORY, arm=side)
                      for side in arms} if source == 'recorded' else {})
     trajectory = next(iter(trajectories.values()), None)
     if any(t.gripper_openings is None for t in trajectories.values()):
         parser.error('Recorded playback requires <arm>_gripper.pos actions for each selected arm')
+    media = None
+    media_panels = None
+    media_provenance = None
+    if args.dataset_media is not None:
+        from .elite_dataset_media import create_episode_panels, load_episode_media
+        media_episode = trajectory.metadata['episode_index'] if args.episode is None else args.episode
+        if media_episode != trajectory.metadata['episode_index']:
+            parser.error('--episode must match the trajectory episode')
+        media = load_episode_media(args.dataset_media, media_episode)
+        if media.frame_count != trajectory.metadata['frame_count']:
+            parser.error('Dataset media frame count must match the trajectory')
     simulation = _simulation(args)
     adapter = EliteStationAdapter(simulation)
     period = next(iter(simulation.arms.values())).config.period
@@ -98,8 +145,17 @@ def main(argv=None):
         steps = min(steps, int(np.ceil(trajectory.duration / period)))
     session = RobotSession(adapter)
     recording = _recording(args.save, viewer_port=args.port if args.viewer else None)
+    if media is not None:
+        from .elite_dataset_media import log_episode_media
+        media_panels = create_episode_panels(recording, adapter.describe())
+        media_provenance = log_episode_media(recording, media, panels=media_panels,
+            source_dataset=trajectory.metadata.get('source_dataset'))
     renderer = PolicyRerunRenderer(recording, adapter.describe(), compact=True,
-                                  shared_view=True, telemetry=args.telemetry, groups=arms)
+                                  shared_view=True, telemetry=args.telemetry, groups=arms,
+                                  blueprint=media is None)
+    if media is not None:
+        media_panels.motion = renderer
+        renderer.set_blueprint_owner(media_panels.blueprint)
     reference_source = (trajectory.provenance() if trajectory else
                         dict(source='synthetic', selected_arm=args.arm, description='Hand-authored reference'))
     reference_source.update(selected_arm=args.arm, selected_arms=list(arms))
@@ -108,8 +164,9 @@ def main(argv=None):
         reference_source['coordination'] = 'Both targets submitted at the same sample time before one native station step'
     recording.log(f'{renderer.panel}/reference_source',
                   renderer.rr.TextDocument(json.dumps(reference_source, indent=2), media_type='text/plain'), static=True)
-    worker = VisualizationWorker(lambda events: renderer.consume_batch(events, stats=worker.stats),
-                                 capacity=args.queue_capacity, close_callback=renderer.close, batch=True)
+    worker = (_SynchronousPolicyDisplay(renderer) if media is not None else
+              VisualizationWorker(lambda events: renderer.consume_batch(events, stats=worker.stats),
+                                  capacity=args.queue_capacity, close_callback=renderer.close, batch=True))
     pending_events = []
     inputs = session.activate('policy')
     policies = {side: PolicyInput(inputs, lambda event, side=side: pending_events.append(replace(event, group=side)))
@@ -229,6 +286,7 @@ def main(argv=None):
         submissions=submissions, display=stats,
         display_closed=closed, sent='unavailable: no transport send telemetry',
         reference_source=reference_source,
+        dataset_media=media_provenance,
         origin=f'offline simulated response / {source} reference', hardware_connections=0)
     if args.save:
         args.save.with_suffix('.json').write_text(json.dumps(result, indent=2)+'\n')
