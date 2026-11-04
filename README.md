@@ -111,3 +111,22 @@ python -m pip check
 - [Elite 输入、状态与运行时](docs/adapters.md)
 - [Policy 数据、轨迹导入与回放语义](docs/policy.md)
 - [Elite SDK 来源与构建信息](vendor/libpyelite-provenance.json)
+
+## 08 工作台的末端模型
+
+更新支持模型目录的 libpyelite wheel 后，用同一入口选择 TacCap 或 DH AG95：
+
+```sh
+xmv-elite-qt --list-models
+xmv-elite-qt --station diagonal-08 --end-effector dh-ag95 --collision-profile auto
+xmv-elite-qt --station diagonal-08 --end-effector taccap --collision-profile auto
+```
+
+窗口标题显示当前模型。省略 `--end-effector` 时，已有 07、08 名称仍选择 TacCap。
+`--station diagonal-08-dh-ag95` 也可直接选择 DH；RRD 录制和 policy 入口共用这份模型目录。
+DH 开度映射允许关节角随张开程度减小，滑块仍为 0% 闭合、100% 张开。
+
+DH 测试配置使用法兰 TCP 和 URDF 开合范围，尚未采用实物 DH 标定。可复制该模型的
+`simulation_recipe.json`，配置左右 TCP 后用 `--recipe` 加载。模型名和 recipe 必须一致。
+同一夹爪内的旧指尖重叠按测试范围临时豁免，外部碰撞检查保留；后续更换指尖需在
+libpyelite 重新生成资产、审查豁免并验证。具体流程见 libpyelite 的 `docs/dh_ag95_collision.md`。
