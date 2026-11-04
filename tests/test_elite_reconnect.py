@@ -86,3 +86,27 @@ def test_viewer_without_state_rpc_reopens_transport_without_replacing_sinks(monk
     recording = SimpleNamespace(_xmv_server=SimpleNamespace(uri='unused'))
     assert _open_recording_viewer(recording, 12345, prepare=lambda: calls.append('refresh'))
     assert calls == ['ensure-viewer', 'refresh']
+
+
+@pytest.mark.parametrize('entry', ['startup', 'reopen'])
+def test_viewer_launch_uses_the_installed_sdk_signature(monkeypatch, entry):
+    from unittest.mock import Mock, create_autospec
+    import rerun as rr
+
+    spawn = create_autospec(rr.spawn, return_value=None)
+    monkeypatch.setattr(rr, 'spawn', spawn)
+    monkeypatch.setattr(elite_module, 'connect_viewer', lambda url: None)
+    recording = SimpleNamespace(set_sinks=Mock())
+    if entry == 'startup':
+        monkeypatch.delattr(rr, 'GrpcServerSink', raising=False)
+        monkeypatch.setattr(rr, 'RecordingStream', lambda *args, **kwargs: recording)
+        assert elite_module._recording(None, viewer_port=12345) is recording
+        recording.set_sinks.assert_called_once()
+    else:
+        recording._xmv_server = SimpleNamespace(uri='unused')
+        assert _open_recording_viewer(recording, 12345)
+    assert spawn.called
+    for call in spawn.call_args_list:
+        assert call.kwargs['port'] == 12345
+        assert call.kwargs['connect'] is False
+        assert call.kwargs['recording'] is recording

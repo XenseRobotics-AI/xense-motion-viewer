@@ -646,8 +646,7 @@ def _open_recording_viewer(recording, port, *, prepare=None):
     deadline = perf_counter() + 3.
     while True:
         try:
-            rr.spawn(port=port, connect=False, recording=recording,
-                     executable_path=str(Path(sys.executable).parent / 'rerun'))
+            rr.spawn(port=port, connect=False, recording=recording)
             client = connect_viewer(f'rerun+http://127.0.0.1:{port}/proxy')
             if client is None:
                 if prepare is not None:
@@ -693,8 +692,7 @@ def _recording(path, *, viewer_port=None):
             sinks.append(recording._xmv_server)
         else:
             from types import SimpleNamespace
-            rr.spawn(port=viewer_port, connect=False, recording=recording,
-                     executable_path=str(Path(sys.executable).parent / 'rerun'))
+            rr.spawn(port=viewer_port, connect=False, recording=recording)
             uri = f'rerun+http://127.0.0.1:{viewer_port}/proxy'
             recording._xmv_server = SimpleNamespace(uri=uri)
             recording._xmv_legacy_viewer = True
