@@ -197,21 +197,22 @@ class LivePanels:
             raise ValueError('Video source interval must be finite, nonnegative and increasing')
         asset = self.rr.AssetVideo(path=path)
         timestamps = np.asarray(asset.read_frame_timestamps_nanos(), dtype=np.int64)
-        seconds = timestamps / 1e9
-        selected = (seconds >= source_from) & (seconds < source_to)
+        # Match the PTS nanosecond resolution before comparing or subtracting boundaries.
+        source_from_ns, source_to_ns = round(source_from * 1e9), round(source_to * 1e9)
+        selected = (timestamps >= source_from_ns) & (timestamps < source_to_ns)
         timestamps = timestamps[selected]
-        host_times = seconds[selected] - source_from
+        host_nanos = timestamps - source_from_ns
         if not len(timestamps):
             raise ValueError(f'No video frames in the episode interval for {key}')
         if expected_frames is not None and len(timestamps) != expected_frames:
             raise ValueError(f'{key} has {len(timestamps)} video frames; expected {expected_frames}')
         self.recording.log(self.image_path(key), asset, static=True)
         self.recording.send_columns(self.image_path(key),
-            indexes=[self.rr.TimeColumn(self.motion.timeline, duration=host_times)],
+            indexes=[self.rr.TimeColumn(self.motion.timeline, duration=host_nanos.astype('timedelta64[ns]'))],
             columns=self.rr.VideoFrameReference.columns_nanos(timestamps))
         self.recording.set_time(self.motion.timeline, duration=0)
         self._status(key, f'Embedded {len(timestamps)} source frames for this episode')
-        return host_times
+        return host_nanos / 1e9
 
     def expire(self, now):
         for key, at in tuple(self._image_times.items()):
