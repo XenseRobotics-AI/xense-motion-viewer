@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xense-motion-viewer"
-version = "0.5.0"
+version = "0.6.0"
 description = "Robot motion workbench with read-only live policy/state visualization and offline Elite tools"
 requires-python = ">=3.12"
 dependencies = ["numpy>=2,<3"]
@@ -13,7 +13,7 @@ dependencies = ["numpy>=2,<3"]
 Repository = "https://github.com/XenseRobotics-AI/xense-motion-viewer"
 
 [project.optional-dependencies]
-rerun = ["rerun-sdk==0.26.2", "trimesh==5.1.1", "pycollada==0.9.3"]
+rerun = ["rerun-sdk==0.26.2", "trimesh==5.1.1", "pycollada==0.9.3", "pillow>=11"]
 elite = ["libpyelite==0.1.0", "PyYAML>=6"]
 qt = ["PySide6>=6.6,<7"]
 test = ["pytest>=8"]

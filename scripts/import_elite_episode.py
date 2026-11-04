@@ -14,7 +14,7 @@ import pyarrow.parquet as pq
 from xense_motion_viewer.adapters.elite_trajectory import RecordedTrajectory
 
 
-def export_episode(root, episode, output):
+def export_episode(root, episode, output, *, source_dataset=None):
     root, output = Path(root), Path(output)
     info_path = root / 'meta/info.json'
     info = json.loads(info_path.read_text())
@@ -40,7 +40,7 @@ def export_episode(root, episode, output):
                 frame_count=len(table), fps=info['fps'], tasks=row['tasks'],
                 feature_names=info['features']['action']['names'], source_column='action',
                 frame='world', position_unit='m', rotation_encoding='first_two_columns',
-                source_dataset=str(root.resolve()), source_data_file=relative,
+                source_dataset=source_dataset or str(root.resolve()), source_data_file=relative,
                 source_data_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
                 source_info_sha256=hashlib.sha256(info_path.read_bytes()).hexdigest(),
                 convention_source='bi_elite_cs66_rt._cartesian_action_to_tcp_pose; '
@@ -62,8 +62,10 @@ def main():
     parser.add_argument('dataset', type=Path)
     parser.add_argument('--episode', type=int, default=0)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--source-dataset', help='Original dataset location recorded in provenance')
     args = parser.parse_args()
-    print(json.dumps(export_episode(args.dataset, args.episode, args.output), indent=2))
+    print(json.dumps(export_episode(args.dataset, args.episode, args.output,
+                                    source_dataset=args.source_dataset), indent=2))
 
 
 if __name__ == '__main__':

@@ -8,6 +8,8 @@
 - **Elite + Policy**：播放采集动作或手写参考，在同一 3D 视图中对比目标与仿真反馈。
 - **真实 Policy + SDK 状态**：接收未来 TCP 参考与真实关节/TCP 状态，显示机器人、已走轨迹与当前点。
   通过公共只读接口接入，详见 [在线显示接口](docs/live.md)。
+  在线显示使用独立进程，支持宿主提供的 RGB 图像、真实任务指令和运行事件。
+  Elite 接入提供头部、双腕与四路触觉面板，子任务和语义动作暂标为 `Not connected`。
 
 Elite 离线工具支持 `diagonal-07`、`diagonal-08` 两种站点，以及 RRD 录制、回放和 Viewer 重连。
 在线显示由宿主提供真机数据；机器人控制、SDK 连接和 VLA 推理均由宿主管理。
@@ -81,6 +83,17 @@ xmv-elite-policy --no-viewer --fast --steps 320 --save recordings/smoke.rrd
 python -m rerun rrd verify recordings/smoke.rrd
 ```
 
+从 LeRobot v3 数据集生成带任务及头部、双腕、四路触觉视频的自包含回放：
+
+```sh
+python scripts/import_elite_episode.py DATASET --episode 1 --output /tmp/episode-001.npz
+xmv-elite-policy --trajectory /tmp/episode-001.npz --dataset-media DATASET --episode 1 \
+  --no-viewer --fast --save recordings/episode-001.rrd
+```
+
+数据集媒体回放使用同步显示写入，不采用在线队列的丢帧语义。`--fast` 只取消墙钟节拍；
+原始动作时间、原生仿真步、30 Hz 显示采样及每路视频帧引用均保留。
+
 `xmv-elite-record` 可单独录制原生仿真状态。录制采用显示采样，可能合并或丢弃显示帧，不是逐控制周期的完整记录；提交成功也不代表已发送或已到达。
 
 ## 开发与文档
@@ -98,3 +111,22 @@ python -m pip check
 - [Elite 输入、状态与运行时](docs/adapters.md)
 - [Policy 数据、轨迹导入与回放语义](docs/policy.md)
 - [Elite SDK 来源与构建信息](vendor/libpyelite-provenance.json)
+
+## 08 工作台的末端模型
+
+更新支持模型目录的 libpyelite wheel 后，用同一入口选择 TacCap 或 DH AG95：
+
+```sh
+xmv-elite-qt --list-models
+xmv-elite-qt --station diagonal-08 --end-effector dh-ag95 --collision-profile auto
+xmv-elite-qt --station diagonal-08 --end-effector taccap --collision-profile auto
+```
+
+窗口标题显示当前模型。省略 `--end-effector` 时，已有 07、08 名称仍选择 TacCap。
+`--station diagonal-08-dh-ag95` 也可直接选择 DH；RRD 录制和 policy 入口共用这份模型目录。
+DH 开度映射允许关节角随张开程度减小，滑块仍为 0% 闭合、100% 张开。
+
+DH 测试配置使用法兰 TCP 和 URDF 开合范围，尚未采用实物 DH 标定。可复制该模型的
+`simulation_recipe.json`，配置左右 TCP 后用 `--recipe` 加载。模型名和 recipe 必须一致。
+同一夹爪内的旧指尖重叠按测试范围临时豁免，外部碰撞检查保留；后续更换指尖需在
+libpyelite 重新生成资产、审查豁免并验证。具体流程见 libpyelite 的 `docs/dh_ag95_collision.md`。

@@ -1,13 +1,13 @@
 """Read-only Rerun display of full policy references and associated streams."""
-from dataclasses import asdict, dataclass, field, replace
 import json
+from dataclasses import asdict, dataclass, field, replace
 
 import numpy as np
 
 from .control import JointTarget, TcpTarget
 from .policy import PolicyChunk, StepRef, StreamEvent
+from .rerun_compat import eye_controls, time_panel
 from .rerun_renderer import RerunRenderer, segment
-from .rerun_compat import time_panel, eye_controls
 
 
 def command_data(command):
@@ -99,10 +99,10 @@ class PolicyRerunRenderer:
     pose/selection; immutable reference coordinates are separate from progress.
     """
     def __init__(self, recording, description, *, timeline='sandbox_elapsed', max_age=0.25,
-                 shared_view=False, telemetry=False, compact=False, groups=None):
+                 shared_view=False, telemetry=False, compact=False, groups=None, blueprint=True):
         import rerun as rr
         self.rr, self.recording = rr, recording
-        self.robot = RerunRenderer(recording, timeline=timeline, compact=compact)
+        self.robot = RerunRenderer(recording, timeline=timeline, compact=compact, blueprint=blueprint)
         self.rr = self.robot.rr
         self.model = self.robot.add_robot(description)
         self.description, self.timeline, self.max_age = description, timeline, max_age
@@ -126,17 +126,34 @@ class PolicyRerunRenderer:
         self._shared_view, self._telemetry = shared_view, telemetry
         self._scene = None
         self._camera_initialized = False
-        self.blueprint()
+        self._blueprint_owner = None
+        if self._shared_view:
+            self._ensure_scene()
+        if blueprint:
+            self.blueprint()
+
+    def set_blueprint_owner(self, owner):
+        """Delegate later dynamic layout refreshes to a composite presenter."""
+        if not callable(owner):
+            raise TypeError('Blueprint owner must be callable')
+        self._blueprint_owner = owner
+
+    def _ensure_scene(self):
+        if self._scene is None:
+            import rerun.blueprint as rrb
+            self._scene = rrb.Spatial3DView(origin='world',
+                contents=['/world/**', f'- /{self.robot.instance_path(self.description.instance_id)}/collision/**'],
+                name='TCP: remaining reference (blue) / target (orange) / feedback (green)')
+        return self._scene
 
     def blueprint(self):
+        if self._blueprint_owner is not None:
+            return self._blueprint_owner()
         import rerun.blueprint as rrb
         channel = next(iter(self._channels.values()))
         status = rrb.TextDocumentView(origin=f'{self.panel}/status', name='Provenance / selection / freshness')
         if self._shared_view:
-            if self._scene is None:
-                self._scene = rrb.Spatial3DView(origin='world',
-                    contents=['/world/**', f'- /{self.robot.instance_path(self.description.instance_id)}/collision/**'],
-                    name='TCP: remaining reference (blue) / target (orange) / feedback (green)')
+            self._ensure_scene()
             contents = rrb.Horizontal(self._scene, status, column_shares=[4, 1]) if self._telemetry else self._scene
             self.recording.send_blueprint(rrb.Blueprint(contents, time_panel(
                 self.timeline, follow=not self._camera_initialized)))
@@ -221,7 +238,6 @@ class PolicyRerunRenderer:
                     channel.selected_points = np.asarray(points)
         if (self._shared_view and not self._camera_initialized and
                 all(ch.selected_points is not None for ch in self._channels.values())):
-            import rerun.blueprint as rrb
             # Frame the working arms and their short paths together, rather than
             # letting the large table/stand make the reference a few pixels.
             points = np.concatenate([ch.selected_points for ch in self._channels.values()])

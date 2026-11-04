@@ -5,8 +5,8 @@ from functools import lru_cache
 import numpy as np
 
 from .contracts import AttachedMesh, RobotDescription, RobotState
-from .urdf import URDFModel
 from .rerun_compat import RerunAPI
+from .urdf import URDFModel
 
 
 @lru_cache(maxsize=1024)
@@ -24,7 +24,7 @@ class RerunRenderer:
     Geometry and local offsets are static, link/TCP/target poses are temporal.
     """
     def __init__(self, recording, *, timeline='simulation', collision_visible=False, compact=False,
-                 tcp_markers=False):
+                 tcp_markers=False, blueprint=True):
         import rerun as rr
         if not isinstance(timeline, str) or not timeline:
             raise ValueError("timeline must be a nonempty clock-domain name")
@@ -34,6 +34,7 @@ class RerunRenderer:
         self.collision_visible = collision_visible
         self.compact = bool(compact)
         self.tcp_markers = bool(tcp_markers)
+        self._blueprint_enabled = bool(blueprint)
         self._last_poses = {}
         self._spatial_view = None
         self.collision_batches = {}
@@ -277,7 +278,8 @@ class RerunRenderer:
             # Keep the view ID and omit eye properties so a visibility toggle
             # does not replace the user's camera with a newly created view.
             self._spatial_view.contents = contents
-        self.recording.send_blueprint(rrb.Blueprint(self._spatial_view))
+        if self._blueprint_enabled:
+            self.recording.send_blueprint(rrb.Blueprint(self._spatial_view))
 
     def flush(self):
         self.recording.flush()
