@@ -15,7 +15,7 @@ from xense_motion_viewer.urdf import URDFModel
 pytestmark = pytest.mark.elite
 
 
-@pytest.mark.parametrize('station', ['diagonal-07', 'diagonal-08'])
+@pytest.mark.parametrize('station', ['diagonal-07', 'diagonal-08', 'diagonal-08-dh-ag95'])
 def test_production_pinocchio_link_tool_and_collision_parity(station):
     import pinocchio as pin
     sim = StationSimulation(station, collision_profile='auto')
@@ -55,11 +55,12 @@ def test_production_pinocchio_link_tool_and_collision_parity(station):
                 [-shape['length']/2-shape['radius'], shape['length']/2+shape['radius']], atol=1e-8)
 
 
-def test_qt_entry_offscreen(tmp_path):
+@pytest.mark.parametrize('model', ['diagonal-08', 'diagonal-08-dh-ag95'])
+def test_qt_entry_offscreen(tmp_path, model):
     path = tmp_path/'qt.rrd'
     env = os.environ | {'QT_QPA_PLATFORM': 'offscreen'}
     process = subprocess.run([sys.executable, '-m', 'xense_motion_viewer.adapters.elite',
-        '--no-viewer', '--no-show', '--display-hz', '60', '--save', str(path), '--collision-profile', 'auto'],
+        '--station', model, '--no-viewer', '--no-show', '--display-hz', '60', '--save', str(path), '--collision-profile', 'auto'],
         env=env, text=True, capture_output=True, timeout=120)
     assert process.returncode == 0, process.stderr
     result = json.loads(process.stdout.strip().splitlines()[-1])

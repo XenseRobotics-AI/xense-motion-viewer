@@ -74,10 +74,10 @@ def example_chunk(adapter, *, kind, chunk_id, now, anchor=None, direction=1, sid
 
 def main(argv=None):
     from ..policy_renderer import PolicyRerunRenderer
-    from .elite import EliteStationAdapter, _recording, _simulation
+    from .elite import EliteStationAdapter, _recording, _simulation, _add_model_arguments
     from .elite_trajectory import DEFAULT_TRAJECTORY, RecordedTrajectory
     parser = argparse.ArgumentParser(description='Offline Elite full policy chunk + native response; no hardware')
-    parser.add_argument('--station', choices=['diagonal-07', 'diagonal-08'])
+    _add_model_arguments(parser)
     parser.add_argument('--recipe', type=Path)
     parser.add_argument('--collision-profile', default='auto')
     parser.add_argument('--save', type=Path)

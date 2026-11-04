@@ -460,7 +460,7 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
             view.set_collision_visible(visible)
 
     window = make_window(qt, Facade(), ViewerFacade() if view else None, xyz_range)
-    window.setWindowTitle('Elite CS66 FK / IK / Follow — Rerun offline sandbox')
+    window.setWindowTitle(simulation.assembly.model.label + ' FK / IK / Follow — Rerun offline sandbox')
     for label in window.findChildren(qt['QLabel']):
         if label.text().startswith('Elite CS66 双臂 FK / IK'):
             label.setText('Elite CS66 双臂 FK / IK / Follow 仿真')
@@ -584,9 +584,19 @@ def make_qt_window(simulation, view, *, xyz_range=0.3):
     return app, window
 
 
+def _add_model_arguments(parser):
+    from libpyelite.assembly import available_models
+    models = available_models()
+    parser.add_argument('--station', choices=sorted({name for m in models for name in (m.id, m.station)}))
+    parser.add_argument('--end-effector', choices=sorted({m.end_effector for m in models}),
+                        help='End effector for the station; existing station names default to TacCap')
+    parser.add_argument('--list-models', action='version',
+                        version='\n'.join(f'{m.id}: {m.label}' for m in models))
+
+
 def _parser(qt=False):
     parser = argparse.ArgumentParser(description='Offline production Elite simulation with Rerun output')
-    parser.add_argument('--station', choices=['diagonal-07', 'diagonal-08'])
+    _add_model_arguments(parser)
     parser.add_argument('--recipe', type=Path)
     parser.add_argument('--collision-profile', help='auto, a profile JSON, or off; same semantics as elite-ik-sim')
     parser.add_argument('--instance-id', default='elite_station')
@@ -617,14 +627,13 @@ def _simulation(args):
         ) from exc
     settings = None if args.recipe is None else load_recipe(args.recipe)
     station = args.station or (settings or {}).get('native_assembly', 'diagonal-08')
-    if settings and settings.get('native_assembly', station) != station:
-        raise ValueError('--station and recipe native_assembly must agree')
     collision = args.collision_profile
     if collision is None:
         collision = (settings or {}).get('native_collision_profile')
     if collision in ('off', 'none', 'null'):
         collision = None
-    return StationSimulation(station, settings=settings, collision_profile=collision)
+    return StationSimulation(station, settings=settings, collision_profile=collision,
+                             end_effector=getattr(args, 'end_effector', None))
 
 
 def _open_recording_viewer(recording, port, *, prepare=None):
@@ -777,16 +786,16 @@ def qt_main(argv=None):
             assert window.session.last_receipt.command.group == selected + '_gripper'
             assert window.ik_gripper_panel.sliders[selected].value() == value
         window.advance(130)
-        assert view.adapter.grippers.opening('left') == .25
-        assert view.adapter.grippers.opening('right') == .75
+        np.testing.assert_allclose([view.adapter.grippers.opening(s) for s in ('left', 'right')],
+                                   [.25, .75], atol=1e-12, rtol=0)
         for selected in sim.arms:
             value = 40 if selected == 'left' else 60
             window.ik_gripper_panel.editors[selected].setValue(value)
             assert window.session.last_receipt.command.group == selected + '_gripper'
             assert window.gripper_panel.sliders[selected].value() == value * 10
         window.advance(130)
-        assert view.adapter.grippers.opening('left') == .4
-        assert view.adapter.grippers.opening('right') == .6
+        np.testing.assert_allclose([view.adapter.grippers.opening(s) for s in ('left', 'right')],
+                                   [.4, .6], atol=1e-12, rtol=0)
         toggle = next(
             (button for button in window.findChildren(__import__('PySide6.QtWidgets', fromlist=['QPushButton']).QPushButton)
              if button.text() == '显示碰撞包络'), None)
