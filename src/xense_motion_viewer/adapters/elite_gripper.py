@@ -33,12 +33,12 @@ class EliteGrippers:
                     or knots.ndim != 2 or knots.shape[1] != 2 or len(knots) < 2
                     or not np.isfinite(knots).all() or np.any(np.diff(knots[:, 0]) <= 0)
                     or knots[0, 0] != 0 or knots[-1, 0] != 1
-                    or np.any(np.diff(knots[:, 1]) <= 0)
+                    or not (np.all(np.diff(knots[:, 1]) > 0) or np.all(np.diff(knots[:, 1]) < 0))
                     or knots[:, 1].min() < float(limit.get('lower'))
                     or knots[:, 1].max() > float(limit.get('upper'))):
                 raise ValueError(f'Invalid Elite gripper opening calibration: {joint}')
             self.drivers[side], self.knots[side] = joint, knots.copy()
-            self.specs[joint] = JointControl('rad', knots[0, 1], knots[-1, 1], 'deg', 180 / np.pi)
+            self.specs[joint] = JointControl('rad', float(knots[:, 1].min()), float(knots[:, 1].max()), 'deg', 180 / np.pi)
             self.velocities[joint] = float(limit.get('velocity'))
             if not np.isfinite(self.velocities[joint]) or self.velocities[joint] <= 0:
                 raise ValueError(f'Invalid finger velocity limit: {joint}')
@@ -61,6 +61,8 @@ class EliteGrippers:
 
     def opening(self, side):
         knots = self.knots[side]
+        if knots[-1, 1] < knots[0, 1]:
+            knots = knots[::-1]
         return float(np.interp(self.positions[self.drivers[side]], knots[:, 1], knots[:, 0]))
 
     def expanded(self, positions=None):
